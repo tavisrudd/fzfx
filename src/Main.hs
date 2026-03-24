@@ -533,7 +533,6 @@ fzfArgs cfg@Config{..} = baseOpts <> selfBindings <> staticBindings
         ]
     selfBindings =
         [ xf cfg "change" STransform "{q}"
-        , bind "start" $ "reload:" <> cSelf <> " " <> flg SReload <> " {q}"
         , xf cfg "alt-a" SToggle "at_prefix"
         , bind "alt-p" "execute(line={}; if [[ \"$line\" == *:*:*:* ]]; then file=\"${line%%:*}\"; else file=$(echo \"$line\" | cut -f2); [ -z \"$file\" ] && file=\"$line\"; fi; fzf-preview \"$file\" 2>&1 | LESS='-Rc~' less)"
         , xf cfg "alt-g" SToggle "diff"
@@ -645,17 +644,24 @@ mainLaunch rest = do
         (\d -> catch (removeDirectoryRecursive (t d)) (\(_ :: IOException) -> pure ()))
         $ \_ -> do
             setEnv "_FZF_STATE_DIR" (t sd)
-            let fzfProc = setStdout createPipe $ proc (t "fzf") (map t (fzfArgs cfg))
-            withProcessWait fzfProc $ \p -> do
-                out <- LBS.hGetContents (getStdout p)
-                ec <- waitExitCode p
-                case ec of
-                    ExitSuccess -> do
-                        let selected = filter (not . T.null) (T.lines (decodeOut out))
-                        unless (null selected) $ do
-                            c <- loadConfig
-                            outputResults c selected
-                    _ -> exitWith ec
+            -- Pipe reload output into fzf's stdin (fzf needs real tty on stderr)
+            let reloadProc = setStdout createPipe
+                           $ proc (t self) [t (flg SReload), t q]
+                fzfCmd = map t (fzfArgs cfg)
+            withProcessWait_ reloadProc $ \reloadP -> do
+                let fzfProc = setStdin (useHandleOpen (getStdout reloadP))
+                            $ setStdout createPipe
+                            $ proc (t "fzf") fzfCmd
+                withProcessWait fzfProc $ \p -> do
+                    out <- LBS.hGetContents (getStdout p)
+                    ec <- waitExitCode p
+                    case ec of
+                        ExitSuccess -> do
+                            let selected = filter (not . T.null) (T.lines (decodeOut out))
+                            unless (null selected) $ do
+                                c <- loadConfig
+                                outputResults c selected
+                        _ -> exitWith ec
 
 detectAi :: Text -> IO Bool
 detectAi pane = do
