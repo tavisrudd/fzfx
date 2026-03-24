@@ -26,7 +26,7 @@ import System.Directory (
     removeDirectoryRecursive,
     setCurrentDirectory,
  )
-import System.Environment (getArgs, lookupEnv, setEnv)
+import System.Environment (getArgs, getExecutablePath, lookupEnv, setEnv)
 import System.Exit (exitWith)
 import System.FilePath (takeDirectory, takeExtension, (</>))
 import System.IO (hFlush, stdout)
@@ -607,7 +607,7 @@ main =
 
 mainLaunch :: [Text] -> IO ()
 mainLaunch rest = do
-    self <- maybe "fzf-insert-files" T.strip <$> readProcMaybe "readlink" ["-f", "/proc/self/exe"]
+    self <- T.pack <$> getExecutablePath
     cwd <- envOrM "_FZFCWD" (T.pack <$> getCurrentDirectory)
     orig <- envOr "_FZF_ORIG_CWD" cwd
     om <- (\s -> if s == "stdout" then OStdout else OTmux) <$> envOr "_FZF_OUTPUT_MODE" "tmux"
