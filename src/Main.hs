@@ -87,6 +87,8 @@ data Subcmd
     | SQueryApply
     | SQueryDelete
     | SQueryList
+    | SSelSave
+    | SSelRestore
     deriving (Eq, Enum, Bounded)
 
 flg :: Subcmd -> Text
@@ -108,6 +110,8 @@ flg = \case
     SQueryApply -> "--query-apply"
     SQueryDelete -> "--query-delete"
     SQueryList -> "--query-list"
+    SSelSave -> "--sel-save"
+    SSelRestore -> "--sel-restore"
 
 parseSubcmd :: String -> Maybe Subcmd
 parseSubcmd s = lookup s [(T.unpack (flg c), c) | c <- [minBound .. maxBound]]
@@ -133,6 +137,8 @@ dispatch sub rest = case sub of
     SQueryApply -> cmdQueryApply
     SQueryDelete -> cmdQueryDelete (toArg rest)
     SQueryList -> cmdQueryList
+    SSelSave -> cmdSelSave (toArg rest)
+    SSelRestore -> cmdSelRestore
   where
     toArg = T.pack . unwords
 
@@ -159,6 +165,8 @@ data Config = Config
     , cQueryStack :: ![Text] -- query history stack
     , cPendingQuery :: !Text -- selected query from pop, applied by transform
     , cWasRg :: !Bool -- was last mode an rg mode?
+    , cSavedFileSel :: ![Text] -- saved file mode selections
+    , cSavedDirSel :: ![Text] -- saved dir mode selections
     }
     deriving (Read, Show)
 
@@ -339,18 +347,18 @@ lineRef (FdLine _ p) = p
 -- ═══════════════════════════════════════════════════════════════════════
 
 cmdReload :: Text -> IO ()
-cmdReload q = withCfg $ \Config{..} ->
+cmdReload q = withCfg $ \cfg@Config{..} ->
     case parseQuery q of
-        FileMode -> reloadFiles cGit cFd cHid cIgn q
+        FileMode -> reloadFiles cfg q
         RgLive p ex -> reloadRgLive p ex
         FzfRg filt rgPat ex -> reloadFzfRg filt rgPat ex
         FzfRgPending filt -> reloadFzfRgPending filt
         RgLocked p f ex -> reloadRgLocked p f ex
 
-reloadFiles :: Text -> FdType -> Bool -> Bool -> Text -> IO ()
-reloadFiles gitRoot fdType fdHid fdIgn query = do
+reloadFiles :: Config -> Text -> IO ()
+reloadFiles Config{..} query = do
     let (sf, _) = parseSFilter query
-        ty = case fdType of FdFiles -> "f"; FdDirs -> "d"
+        ty = case cFd of FdFiles -> "f"; FdDirs -> "d"
         fa =
             [ "--type"
             , ty
@@ -360,9 +368,9 @@ reloadFiles gitRoot fdType fdHid fdIgn query = do
             , "node_modules"
             , "--strip-cwd-prefix"
             ]
-                <> ["--hidden" | fdHid]
+                <> ["--hidden" | cHid]
                 <> ["-L"]
-                <> ["--no-ignore-vcs" | fdIgn]
+                <> ["--no-ignore-vcs" | cIgn]
     out <- readProc "fd" fa
     extraFiles <- loadFzfxInclude ty
     let mainFiles = sort $ filter (not . T.null) (T.lines out)
@@ -370,7 +378,7 @@ reloadFiles gitRoot fdType fdHid fdIgn query = do
         newExtras = sort $ filter (\f -> not (Set.member f mainSet)) extraFiles
         files = interleave mainFiles newExtras
     labeled <-
-        if T.null gitRoot
+        if T.null cGit
             then pure [(Clean, f) | f <- files]
             else do
                 pfx <- T.strip <$> readProc "git" ["rev-parse", "--show-prefix"]
@@ -386,7 +394,20 @@ reloadFiles gitRoot fdType fdHid fdIgn query = do
                 pure [(classify f, f) | f <- files]
     let ok = filter (\(st, _) -> maybe True (== st) sf) labeled
         (top, bot) = partition (\(_, f) -> "src/" `T.isPrefixOf` f) ok
-    mapM_ (\(st, f) -> TIO.putStrLn (gitStatusChar st <> "\t" <> f)) (top <> bot)
+        final = top <> bot
+        -- Compute positions of saved selections for restore
+        savedSel = case cFd of
+            FdFiles -> Set.fromList cSavedFileSel
+            FdDirs -> Set.fromList cSavedDirSel
+        positions = [showT i | (i, (_, f)) <- zip [1 :: Int ..] final, Set.member f savedSel]
+    unless (null positions) $ do
+        let posFile = t cDir </> "sel-positions"
+        writeFile posFile (T.unpack (T.unlines positions))
+        -- Clear saved selections after computing positions
+        case cFd of
+            FdFiles -> void $ modConfig $ \x -> x{cSavedFileSel = []}
+            FdDirs -> void $ modConfig $ \x -> x{cSavedDirSel = []}
+    mapM_ (\(st, f) -> TIO.putStrLn (gitStatusChar st <> "\t" <> f)) final
     hFlush stdout
 
 loadFzfxInclude :: Text -> IO [Text]
@@ -640,6 +661,31 @@ cmdQueryList = do
     c <- loadConfig
     mapM_ TIO.putStrLn (cQueryStack c)
     hFlush stdout
+
+-- | Save current selections for a mode (file/dir).
+-- Mode passed as arg, paths read from stdin (newline-separated).
+cmdSelSave :: Text -> IO ()
+cmdSelSave mode = do
+    input <- TIO.getContents
+    let paths = filter (not . T.null) $ T.lines input
+    case mode of
+        "file" -> void $ modConfig $ \x -> x{cSavedFileSel = paths}
+        "dir" -> void $ modConfig $ \x -> x{cSavedDirSel = paths}
+        _ -> pure ()
+
+-- | Restore saved selections after a mode switch reload.
+-- Called from load event transform — reads pending positions file and emits pos()+select actions.
+cmdSelRestore :: IO ()
+cmdSelRestore = do
+    c <- loadConfig
+    let posFile = t (cDir c) </> "sel-positions"
+    positions <- catch (filter (not . T.null) . T.lines . T.pack <$> readFile' posFile)
+                       (\(_ :: IOException) -> pure [])
+    unless (null positions) $ do
+        writeFile posFile ""
+        let actions = T.intercalate "+" $ concatMap (\p -> ["pos(" <> p <> ")", "select"]) positions
+        TIO.putStr actions
+        hFlush stdout
 
 cmdEdit :: Text -> IO ()
 cmdEdit line = withCfg $ \_ -> do
@@ -946,8 +992,8 @@ fzfArgs cfg@Config{..} = baseOpts <> selfBindings <> staticBindings
         , bind "alt-?" (statusToggle "?")
         , xf cfg "alt-h" SToggle "hidden"
         , xf cfg "alt-i" SToggle "no_ignore"
-        , xf cfg "ctrl-d" SToggle "type_d {q}"
-        , xf cfg "ctrl-f" SToggle "type_f {q}"
+        , bind "ctrl-d" ("execute-silent([ \"$FZF_SELECT_COUNT\" -gt 0 ] && printf '%s\\n' {+2} | " <> cSelf <> " " <> flg SSelSave <> " file)+transform:" <> cSelf <> " " <> flg SToggle <> " type_d {q}")
+        , bind "ctrl-f" ("execute-silent([ \"$FZF_SELECT_COUNT\" -gt 0 ] && printf '%s\\n' {+2} | " <> cSelf <> " " <> flg SSelSave <> " dir)+transform:" <> cSelf <> " " <> flg SToggle <> " type_f {q}")
         , bc cfg "ctrl-o" SNavigate "into {} {q}"
         , bc cfg "ctrl-l" SNavigate "up {} {q}"
         , bc cfg "ctrl-r" SNavigate "root {} {q}"
@@ -980,6 +1026,7 @@ fzfArgs cfg@Config{..} = baseOpts <> selfBindings <> staticBindings
         , xf cfg "f4" SQueryPush "{q}"
         , xe cfg "f3" SQueryPop "" ("+transform:" <> cSelf <> " " <> flg SQueryApply)
         , bind "zero" ("preview(" <> cSelf <> " " <> flg SPreview <> ")")
+        , bind "load" ("transform:" <> cSelf <> " " <> flg SSelRestore)
         ]
 
 -- ═══════════════════════════════════════════════════════════════════════
@@ -1112,6 +1159,7 @@ mainLaunch rest = do
             , cHid = hid, cIgn = False, cPrev = Content
             , cFileQuery = fq, cDirQuery = dq
             , cQueryStack = persistedStack, cPendingQuery = "", cWasRg = False
+            , cSavedFileSel = [], cSavedDirSel = []
             }
 
     setCurrentDirectory (t cwd)
