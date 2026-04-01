@@ -407,7 +407,7 @@ cmdCopy :: Text -> IO ()
 cmdCopy line = do
     let path = T.stripEnd $ lineFile (parseLine line)
     runProcess_ $
-        setStdin (byteStringInput (LBS.fromStrict (TE.encodeUtf8 (path <> "\n")))) $
+        setStdin (byteStringInput (LBS.fromStrict (TE.encodeUtf8 path))) $
             proc "tmux" ["load-buffer", "-w", "-"]
 
 cmdTransform :: Text -> IO ()
