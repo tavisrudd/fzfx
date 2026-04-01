@@ -29,9 +29,9 @@ import System.Directory (
 import System.Environment (getArgs, getExecutablePath, lookupEnv, setEnv)
 import System.Exit (exitWith)
 import System.FilePath (takeDirectory, takeExtension, (</>))
-import GHC.IO.Handle (hDuplicateTo)
-import System.IO (IOMode (ReadWriteMode), hFlush, openFile, stdin, stdout)
-import System.Posix.Process (getProcessID)
+import System.IO (hFlush, stdout)
+import System.Posix.IO (dupTo, stdError, stdInput, stdOutput)
+import System.Posix.Process (executeFile, getProcessID)
 import System.Process.Typed hiding (setEnv)
 
 -- ═══════════════════════════════════════════════════════════════════════
@@ -394,16 +394,17 @@ cmdOpen :: Text -> IO ()
 cmdOpen line = withCfg $ \_ -> do
     reopenTty
     case parseLine line of
-        RgLine f ln -> exec "tr-edit" ["+" <> showT ln, f]
-        FdLine _ p -> exec "tr-edit" [p]
+        RgLine f ln -> executeFile "tr-edit" True [t ("+" <> showT ln), t f] Nothing
+        FdLine _ p -> executeFile "tr-edit" True [t p] Nothing
 
--- | Reopen stdin/stdout from /dev/tty so editors get a proper terminal
--- (fzf's become: inherits piped stdout from fzfx)
+-- | Restore stdin/stdout to the terminal for become: handlers.
+-- fzfx pipes fzf's stdin (reload data) and stdout (selection capture),
+-- but stderr is inherited as the real pty throughout fzfx → fzf → become.
+-- Dup stderr over the piped fds so child processes get a proper terminal.
 reopenTty :: IO ()
 reopenTty = do
-    tty <- openFile "/dev/tty" ReadWriteMode
-    hDuplicateTo tty stdin
-    hDuplicateTo tty stdout
+    _ <- dupTo stdError stdInput
+    void $ dupTo stdError stdOutput
 
 cmdMagit :: Text -> IO ()
 cmdMagit line = withCfg $ \_ ->
