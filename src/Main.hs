@@ -548,7 +548,7 @@ fzfArgs cfg@Config{..} = baseOpts <> selfBindings <> staticBindings
         , bc cfg "ctrl-l" SNavigate "up {} {q}"
         , bc cfg "ctrl-r" SNavigate "root {} {q}"
         , bc cfg "alt-." SNavigate "toggle_root {} {q}"
-        , xe cfg "alt-enter" SOpen "{}" "+abort"
+        , bc cfg "alt-enter" SOpen "{}"
         , xe cfg "alt-," SMagit "{}" "+abort"
         , xe cfg "alt-c" SCopy "{}" "+abort"
         , xe cfg "ctrl-alt-l" SForgit "{}" ""
