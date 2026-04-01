@@ -29,7 +29,8 @@ import System.Directory (
 import System.Environment (getArgs, getExecutablePath, lookupEnv, setEnv)
 import System.Exit (exitWith)
 import System.FilePath (takeDirectory, takeExtension, (</>))
-import System.IO (hFlush, stdout)
+import GHC.IO.Handle (hDuplicateTo)
+import System.IO (IOMode (ReadWriteMode), hFlush, openFile, stdin, stdout)
 import System.Posix.Process (getProcessID)
 import System.Process.Typed hiding (setEnv)
 
@@ -390,10 +391,19 @@ contentPrev path = do
                 else exec "bat" [path, "--style=plain", "--color=always", "--line-range", "0:100"]
 
 cmdOpen :: Text -> IO ()
-cmdOpen line = withCfg $ \_ ->
+cmdOpen line = withCfg $ \_ -> do
+    reopenTty
     case parseLine line of
         RgLine f ln -> exec "tr-edit" ["+" <> showT ln, f]
         FdLine _ p -> exec "tr-edit" [p]
+
+-- | Reopen stdin/stdout from /dev/tty so editors get a proper terminal
+-- (fzf's become: inherits piped stdout from fzfx)
+reopenTty :: IO ()
+reopenTty = do
+    tty <- openFile "/dev/tty" ReadWriteMode
+    hDuplicateTo tty stdin
+    hDuplicateTo tty stdout
 
 cmdMagit :: Text -> IO ()
 cmdMagit line = withCfg $ \_ ->
