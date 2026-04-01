@@ -66,7 +66,7 @@ data LineInfo
 data Subcmd
     = SReload
     | SPreview
-    | SOpen
+    | SEdit
     | STransform
     | SToggle
     | SNavigate
@@ -79,7 +79,7 @@ flg :: Subcmd -> Text
 flg = \case
     SReload -> "--reload"
     SPreview -> "--preview"
-    SOpen -> "--open"
+    SEdit -> "--edit"
     STransform -> "--transform"
     SToggle -> "--toggle"
     SNavigate -> "--navigate"
@@ -99,7 +99,7 @@ dispatch sub rest = case sub of
     SNavigate -> case rest of
         (a : l : q : _) -> cmdNavigate (T.pack a) (T.pack l) (T.pack q)
         _ -> cmdNavigate "" "" ""
-    SOpen -> cmdOpen (toArg rest)
+    SEdit -> cmdEdit (toArg rest)
     SMagit -> cmdMagit (toArg rest)
     SForgit -> cmdForgit (toArg rest)
     SCopy -> cmdCopy (toArg rest)
@@ -390,8 +390,8 @@ contentPrev path = do
                 then exec "nbpreview" [path]
                 else exec "bat" [path, "--style=plain", "--color=always", "--line-range", "0:100"]
 
-cmdOpen :: Text -> IO ()
-cmdOpen line = withCfg $ \_ -> do
+cmdEdit :: Text -> IO ()
+cmdEdit line = withCfg $ \_ -> do
     reopenTty
     case parseLine line of
         RgLine f ln -> executeFile "tr-edit" True [t ("+" <> showT ln), t f] Nothing
@@ -559,7 +559,7 @@ fzfArgs cfg@Config{..} = baseOpts <> selfBindings <> staticBindings
         , bc cfg "ctrl-l" SNavigate "up {} {q}"
         , bc cfg "ctrl-r" SNavigate "root {} {q}"
         , bc cfg "alt-." SNavigate "toggle_root {} {q}"
-        , bc cfg "alt-enter" SOpen "{}"
+        , bc cfg "alt-enter" SEdit "{}"
         , xe cfg "alt-," SMagit "{}" "+abort"
         , xe cfg "alt-c" SCopy "{}" "+abort"
         , xe cfg "ctrl-alt-l" SForgit "{}" ""
