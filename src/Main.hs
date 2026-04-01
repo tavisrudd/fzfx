@@ -43,6 +43,8 @@ data SearchMode
     = FileMode
     | RgLive Text [Text] -- pattern, extra args
     | RgLocked Text Text [Text] -- pattern, filter, extra args
+    | FzfRg Text Text [Text] -- fzf filter, rg pattern, extra args
+    | FzfRgPending Text -- fzf filter (waiting for rg input after #)
 
 data GitStatus = Unstaged | Staged | Untracked | Clean
     deriving (Eq, Ord)
@@ -75,6 +77,7 @@ data Subcmd
     | SForgit
     | SCopy
     | SDebug
+    | SSwap
     deriving (Eq, Enum, Bounded)
 
 flg :: Subcmd -> Text
@@ -89,6 +92,7 @@ flg = \case
     SForgit -> "--forgit-log"
     SCopy -> "--copy"
     SDebug -> "--debug"
+    SSwap -> "--swap"
 
 parseSubcmd :: String -> Maybe Subcmd
 parseSubcmd s = lookup s [(T.unpack (flg c), c) | c <- [minBound .. maxBound]]
@@ -107,6 +111,7 @@ dispatch sub rest = case sub of
     SForgit -> cmdForgit (toArg rest)
     SCopy -> cmdCopy (toArg rest)
     SDebug -> cmdDebug
+    SSwap -> cmdSwap (toArg rest)
   where
     toArg = T.pack . unwords
 
@@ -234,8 +239,18 @@ parseQuery q
             | otherwise ->
                 let (pat, ex) = splitEx p
                  in RgLive pat ex
+    | Just (filt, rgPat) <- parseFzfRg q =
+        if T.null (T.stripStart rgPat)
+        then FzfRgPending filt
+        else let (pat, ex) = splitEx rgPat
+              in FzfRg filt pat ex
     | otherwise = FileMode
   where
+    parseFzfRg s = case T.breakOn "#" s of
+        (before, rest)
+            | not (T.null before), not (T.null rest) ->
+                Just (T.strip before, T.drop 1 rest)
+            | otherwise -> Nothing
     splitEx s = case T.breakOn " -- " s of
         (p', rest')
             | T.null rest' -> (T.strip p', [])
@@ -263,21 +278,18 @@ parseLine raw = case tryRg (stripAnsi raw) of
 
 -- | Parse rg output: file:line:col:text
 tryRg :: Text -> Maybe (Text, Int)
-tryRg s = do
-    (rest1, _text) <- breakEnd ':' s
-    (rest2, colS) <- breakEnd ':' rest1
-    guard (isAllDigit colS)
-    (file, lnS) <- breakEnd ':' rest2
-    guard (isAllDigit lnS)
-    pure (file, read (T.unpack lnS))
+tryRg s = case T.break (== ':') s of
+    (file, rest1) | not (T.null file), Just r1 <- T.stripPrefix ":" rest1 ->
+        case T.break (== ':') r1 of
+            (lnS, rest2) | isAllDigit lnS, Just r2 <- T.stripPrefix ":" rest2 ->
+                case T.break (== ':') r2 of
+                    (colS, rest3) | isAllDigit colS, not (T.null rest3) ->
+                        Just (file, read (T.unpack lnS))
+                    _ -> Nothing
+            _ -> Nothing
+    _ -> Nothing
   where
-    breakEnd c s' = case T.breakOnEnd (T.singleton c) s' of
-        (before, after)
-            | T.null before -> Nothing
-            | otherwise -> Just (T.dropEnd 1 before, after)
     isAllDigit s' = not (T.null s') && T.all isDigit s'
-    guard False = Nothing
-    guard True = Just ()
 
 stripAnsi :: Text -> Text
 stripAnsi txt
@@ -292,6 +304,10 @@ lineFile :: LineInfo -> Text
 lineFile (RgLine f _) = f
 lineFile (FdLine _ p) = p
 
+lineRef :: LineInfo -> Text
+lineRef (RgLine f ln) = f <> ":" <> showT ln
+lineRef (FdLine _ p) = p
+
 -- ═══════════════════════════════════════════════════════════════════════
 -- Subcommand Handlers
 -- ═══════════════════════════════════════════════════════════════════════
@@ -301,6 +317,8 @@ cmdReload q = withCfg $ \Config{..} ->
     case parseQuery q of
         FileMode -> reloadFiles cGit cFd cHid cIgn q
         RgLive p ex -> reloadRgLive p ex
+        FzfRg filt rgPat ex -> reloadFzfRg filt rgPat ex
+        FzfRgPending filt -> reloadFzfRgPending filt
         RgLocked p f ex -> reloadRgLocked p f ex
 
 reloadFiles :: Text -> FdType -> Bool -> Bool -> Text -> IO ()
@@ -351,23 +369,61 @@ reloadRgLive pat ex = unless (T.null pat) $ do
 
 reloadRgLocked :: Text -> Text -> [Text] -> IO ()
 reloadRgLocked pat filt ex = unless (T.null pat) $ do
-    let args =
+    let rgArgs =
             ["--files-with-matches", "--no-heading", "--color=never", "--smart-case", "--sort=path"]
                 <> ex
                 <> ["--", pat]
-    out <- catch (readProc "rg" args) (\(_ :: IOException) -> pure "")
+    out <- catch (readProc "rg" rgArgs) (\(_ :: IOException) -> pure "")
     let files = filter (not . T.null) (T.lines out)
-        filtered = if T.null filt then files
-                   else filter (T.isInfixOf (T.toLower filt) . T.toLower) files
+    filtered <- if T.null filt then pure files
+                else do
+                    let input = LBS.fromStrict $ TE.encodeUtf8 $ T.unlines files
+                    fout <- catch
+                        (decodeOut . fst <$> readProcess_ (setStdin (byteStringInput input) $ proc "fzf" ["--filter", t filt]))
+                        (\(_ :: IOException) -> pure "")
+                    pure $ filter (not . T.null) (T.lines fout)
+    mapM_ (\f -> TIO.putStrLn (" \t" <> f)) filtered
+    hFlush stdout
+
+reloadFzfRg :: Text -> Text -> [Text] -> IO ()
+reloadFzfRg filt rgPat ex = unless (T.null rgPat) $ do
+    -- Get all files, filter with fzf, then rg within matches
+    fdOut <- readProc "fd" ["--type", "f", "--exclude", ".git", "--exclude", "node_modules", "--strip-cwd-prefix"]
+    let allFiles = filter (not . T.null) (T.lines fdOut)
+    targets <- if T.null filt then pure allFiles
+               else do
+                   let input = LBS.fromStrict $ TE.encodeUtf8 $ T.unlines allFiles
+                   fout <- catch
+                       (decodeOut . fst <$> readProcess_ (setStdin (byteStringInput input) $ proc "fzf" ["--filter", t filt]))
+                       (\(_ :: IOException) -> pure "")
+                   pure $ filter (not . T.null) (T.lines fout)
+    unless (null targets) $ do
+        let rgArgs = ["--column", "--line-number", "--no-heading", "--color=always", "--smart-case"]
+                <> ex <> ["--", rgPat] <> targets
+        runProcess_ $ setStdout inherit $ setStderr nullStream $ proc "rg" (map t rgArgs)
+
+reloadFzfRgPending :: Text -> IO ()
+reloadFzfRgPending filt = do
+    fdOut <- readProc "fd" ["--type", "f", "--exclude", ".git", "--exclude", "node_modules", "--strip-cwd-prefix"]
+    let allFiles = filter (not . T.null) (T.lines fdOut)
+    filtered <- if T.null filt then pure allFiles
+                else do
+                    let input = LBS.fromStrict $ TE.encodeUtf8 $ T.unlines allFiles
+                    fout <- catch
+                        (decodeOut . fst <$> readProcess_ (setStdin (byteStringInput input) $ proc "fzf" ["--filter", t filt]))
+                        (\(_ :: IOException) -> pure "")
+                    pure $ filter (not . T.null) (T.lines fout)
     mapM_ (\f -> TIO.putStrLn (" \t" <> f)) filtered
     hFlush stdout
 
 cmdPreview :: Text -> IO ()
 cmdPreview line = withCfg $ \Config{..} -> do
     cols <- maybe 80 readInt <$> lookupEnv "FZF_PREVIEW_COLUMNS"
+    rows <- maybe 40 readInt <$> lookupEnv "FZF_PREVIEW_LINES"
     case parseLine line of
         RgLine file ln ->
-            exec "bat" ["--color=always", "--style=numbers", "--highlight-line", showT ln, "--", file]
+            let start = max 1 (ln - rows `div` 2)
+            in exec "bat" ["--color=always", "--style=numbers", "--highlight-line", showT ln, "--line-range", showT start <> ":", "--", file]
         FdLine st path
             | cPrev == Diff, st /= Clean -> diffPrev st path cols
             | otherwise -> contentPrev path
@@ -477,6 +533,17 @@ cmdDebug = withCfg $ \cfg -> do
             pad n s = s <> T.replicate (max 0 (n - T.length s)) " "
         in map (\(f, desc, v) -> pad 7 f <> pad 14 desc <> " = " <> v) fields
 
+-- | Swap between #rg#filter and filter#rg query formats
+cmdSwap :: Text -> IO ()
+cmdSwap q = do
+    let swapped = case parseQuery q of
+            RgLive pat _     -> pat <> "#"
+            RgLocked pat f _ -> f <> "#" <> pat
+            FzfRg f pat _    -> "#" <> pat <> "#" <> f
+            FzfRgPending f   -> "#" <> f
+            FileMode         -> q <> "#"
+    TIO.putStr ("change-query(" <> swapped <> ")") >> hFlush stdout
+
 cmdMagit :: Text -> IO ()
 cmdMagit line = withCfg $ \_ ->
     exec "magit-file-status" [lineFile (parseLine line)]
@@ -499,6 +566,8 @@ cmdTransform q = withCfg $ \Config{..} -> do
             FileMode -> "change-prompt(files> )+enable-search+reload(" <> rl <> ")"
             RgLive{} -> "change-prompt(rg> )+disable-search+reload(" <> rl <> ")"
             RgLocked{} -> "change-prompt(filter> )+disable-search+reload(" <> rl <> ")"
+            FzfRg{} -> "change-prompt(fzf#rg> )+disable-search+reload(" <> rl <> ")"
+            FzfRgPending{} -> "change-prompt(fzf#> )+disable-search+reload(" <> rl <> ")"
     TIO.putStr act >> hFlush stdout
 
 hdrText :: Config -> Text
@@ -673,15 +742,16 @@ fzfArgs cfg@Config{..} = baseOpts <> selfBindings <> staticBindings
         , xf cfg "alt-i" SToggle "no_ignore"
         , xf cfg "ctrl-d" SToggle "type_d"
         , xf cfg "ctrl-f" SToggle "type_f"
-        , bc cfg "ctrl-o" SNavigate "into {2} {q}"
-        , bc cfg "ctrl-l" SNavigate "up {2} {q}"
-        , bc cfg "ctrl-r" SNavigate "root {2} {q}"
-        , bc cfg "alt-." SNavigate "toggle_root {2} {q}"
-        , bc cfg "alt-enter" SEdit "{2}"
-        , xe cfg "alt-," SMagit "{2}" "+abort"
-        , xe cfg "alt-c" SCopy "{2}" "+abort"
-        , xe cfg "ctrl-alt-l" SForgit "{2}" ""
+        , bc cfg "ctrl-o" SNavigate "into {} {q}"
+        , bc cfg "ctrl-l" SNavigate "up {} {q}"
+        , bc cfg "ctrl-r" SNavigate "root {} {q}"
+        , bc cfg "alt-." SNavigate "toggle_root {} {q}"
+        , bc cfg "alt-enter" SEdit "{}"
+        , xe cfg "alt-," SMagit "{}" "+abort"
+        , xe cfg "alt-c" SCopy "{}" "+abort"
+        , xe cfg "ctrl-alt-l" SForgit "{}" ""
         , xe cfg "ctrl-alt-d" SDebug "" ""
+        , xf cfg "alt-r" SSwap "{q}"
         ]
     staticBindings =
         [ bind "tab" "toggle+down"
@@ -710,8 +780,11 @@ fzfArgs cfg@Config{..} = baseOpts <> selfBindings <> staticBindings
 
 outputResults :: Config -> [Text] -> IO ()
 outputResults Config{..} sel = do
-    let raw = dedup $ sort $ map (lineFile . parseLine) sel
-        files = map (makeRelPath cOrig cCwd) raw
+    let parsed = map parseLine sel
+        resolve li = case li of
+            RgLine f ln -> makeRelPath cOrig cCwd f <> ":" <> showT ln
+            FdLine _ p -> makeRelPath cOrig cCwd p
+        files = dedup $ sort $ map resolve parsed
     case cOut of
         OStdout -> mapM_ TIO.putStrLn files
         OTmux -> do
