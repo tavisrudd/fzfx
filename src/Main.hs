@@ -405,7 +405,7 @@ cmdForgit line = withCfg $ \_ ->
 
 cmdCopy :: Text -> IO ()
 cmdCopy line = do
-    let path = lineFile (parseLine line)
+    let path = T.stripEnd $ lineFile (parseLine line)
     runProcess_ $
         setStdin (byteStringInput (LBS.fromStrict (TE.encodeUtf8 (path <> "\n")))) $
             proc "tmux" ["load-buffer", "-w", "-"]
