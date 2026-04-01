@@ -155,9 +155,9 @@ modConfig f = do
 
 getStateDir :: IO Text
 getStateDir =
-    lookupEnv "_FZF_STATE_DIR" >>= \case
+    lookupEnv "_FZFX_STATE_DIR" >>= \case
         Just d | not (null d) -> pure (T.pack d)
-        _ -> error "_FZF_STATE_DIR not set"
+        _ -> error "_FZFX_STATE_DIR not set"
 
 -- ═══════════════════════════════════════════════════════════════════════
 -- Utilities
@@ -467,13 +467,13 @@ cmdNavigate navAction sel query = do
         _ -> pure cCwd
     nGit <- detectGit nCwd
     void $ modConfig $ \x -> x{cCwd = nCwd, cGit = nGit}
-    setEnv "_FZFCWD" (t nCwd)
-    setEnv "_FZF_QUERY" (t query)
-    setEnv "_ADD_AT_PREFIX" (if cAt then "1" else "0")
-    setEnv "_FDTYPE" (case cFd of FdFiles -> "f"; FdDirs -> "d")
-    setEnv "_FD_HIDDEN" (if cHid then "--hidden" else "")
-    lookupEnv "_FZF_STATE_DIR" >>= mapM_ (\d -> catch (removeDirectoryRecursive d) (\(_ :: IOException) -> pure ()))
-    setEnv "_FZF_STATE_DIR" ""
+    setEnv "_FZFX_CWD" (t nCwd)
+    setEnv "_FZFX_QUERY" (t query)
+    setEnv "_FZFX_AT_PREFIX" (if cAt then "1" else "0")
+    setEnv "_FZFX_FDTYPE" (case cFd of FdFiles -> "f"; FdDirs -> "d")
+    setEnv "_FZFX_HIDDEN" (if cHid then "--hidden" else "")
+    lookupEnv "_FZFX_STATE_DIR" >>= mapM_ (\d -> catch (removeDirectoryRecursive d) (\(_ :: IOException) -> pure ()))
+    setEnv "_FZFX_STATE_DIR" ""
     mainLaunch []
 
 detectGit :: Text -> IO Text
@@ -608,21 +608,27 @@ main =
 mainLaunch :: [Text] -> IO ()
 mainLaunch rest = do
     self <- T.pack <$> getExecutablePath
-    cwd <- envOrM "_FZFCWD" (T.pack <$> getCurrentDirectory)
-    orig <- envOr "_FZF_ORIG_CWD" cwd
-    om <- (\s -> if s == "stdout" then OStdout else OTmux) <$> envOr "_FZF_OUTPUT_MODE" "tmux"
+    cwd <- envOrM "_FZFX_CWD" (T.pack <$> getCurrentDirectory)
+    orig <- envOr "_FZFX_ORIG_CWD" cwd
+    omEnv <- envOr "_FZFX_OUTPUT_MODE" ""
+    inTmux <- maybe False (not . null) <$> lookupEnv "TMUX"
     pane <-
-        lookupEnv "_FZF_PANE" >>= \case
+        if not inTmux then pure ""
+        else lookupEnv "_FZFX_PANE" >>= \case
             Just p | not (null p) -> pure (T.pack p)
             _ ->
                 lookupEnv "TMUX_TARGET_PANE" >>= \case
                     Just p | not (null p) -> pure (T.pack p)
                     _ -> fromMaybe "" <$> readProcMaybe "tmux" ["display-message", "-p", "#{pane_id}"]
-    at <- (== "1") <$> envOr "_ADD_AT_PREFIX" "0"
-    fd <- (\s -> if s == "d" then FdDirs else FdFiles) <$> envOr "_FDTYPE" "f"
-    hid <- T.isInfixOf "--hidden" <$> envOr "_FD_HIDDEN" ""
+    let om = case omEnv of
+                "stdout" -> OStdout
+                "tmux"   -> OTmux
+                _        -> if T.null pane then OStdout else OTmux
+    at <- (== "1") <$> envOr "_FZFX_AT_PREFIX" "0"
+    fd <- (\s -> if s == "d" then FdDirs else FdFiles) <$> envOr "_FZFX_FDTYPE" "f"
+    hid <- T.isInfixOf "--hidden" <$> envOr "_FZFX_HIDDEN" ""
     q <-
-        lookupEnv "_FZF_QUERY" >>= \case
+        lookupEnv "_FZFX_QUERY" >>= \case
             Just v | not (null v) -> pure (T.pack v)
             _ -> pure (T.unwords rest)
     git <- detectGit cwd
@@ -643,7 +649,7 @@ mainLaunch rest = do
         (saveConfig cfg >> pure sd)
         (\d -> catch (removeDirectoryRecursive (t d)) (\(_ :: IOException) -> pure ()))
         $ \_ -> do
-            setEnv "_FZF_STATE_DIR" (t sd)
+            setEnv "_FZFX_STATE_DIR" (t sd)
             -- Pipe reload output into fzf's stdin (fzf needs real tty on stderr)
             let reloadProc = setStdout createPipe
                            $ proc (t self) [t (flg SReload), t q]
