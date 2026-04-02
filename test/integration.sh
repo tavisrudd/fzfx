@@ -33,12 +33,14 @@ trap cleanup EXIT
 
 setup_test_dir() {
     TEST_DIR="$(mktemp -d /tmp/fzfx-integ-XXXXXX)"
-    mkdir -p "$TEST_DIR/src" "$TEST_DIR/lib" "$TEST_DIR/sub/deep"
+    mkdir -p "$TEST_DIR/src" "$TEST_DIR/lib" "$TEST_DIR/sub/deep/bottom"
     echo 'main = putStrLn "hello"' > "$TEST_DIR/src/Main.hs"
     echo 'module Lib where'        > "$TEST_DIR/lib/Lib.hs"
     echo 'import Data.Text'        > "$TEST_DIR/src/Other.hs"
     echo 'readme content'          > "$TEST_DIR/README.md"
     echo 'nested file'             > "$TEST_DIR/sub/deep/nested.txt"
+    echo 'bottom file'             > "$TEST_DIR/sub/deep/bottom/floor.txt"
+    echo 'sub-level file'          > "$TEST_DIR/sub/mid.txt"
     echo '.hidden content'         > "$TEST_DIR/.hidden"
     # Init a git repo so fzfx can detect git status
     (cd "$TEST_DIR" && git init -q && git -c commit.gpgsign=false commit --allow-empty -q -m "init" && git add -A && git -c commit.gpgsign=false commit -q -m "add files")
@@ -313,6 +315,156 @@ test_status_filter() {
     sleep 0.3
 }
 
+test_progressive_navigate_down_and_up() {
+    echo "# test_progressive_navigate_down_and_up"
+    launch_fzfx
+    wait_for "files>" 3 || true
+
+    # --- Level 0: project root ---
+    assert_contains "L0: root has README" "README.md"
+    assert_contains "L0: root has src/Main.hs" "Main.hs"
+
+    # Switch to dirs mode
+    send "C-/"
+    sleep 0.8
+    assert_prompt "L0: dirs prompt" "dirs>"
+    assert_contains "L0: dirs shows sub" "sub"
+
+    # --- Descend into sub/ ---
+    send "C-u"
+    sleep 0.2
+    send "sub"
+    sleep 0.5
+    send "C-o"  # navigate into sub
+    sleep 1.2
+    wait_for "files>" 3 || true
+
+    # Should now be in sub/, showing its files
+    assert_contains "L1: sub has mid.txt" "mid.txt"
+
+    # Switch to dirs to go deeper
+    send "C-/"
+    sleep 0.8
+    send "C-u"  # clear any leftover query
+    sleep 0.5
+    assert_prompt "L1: dirs prompt" "dirs>"
+    assert_contains "L1: dirs shows deep" "deep"
+
+    # --- Descend into sub/deep/ ---
+    send "deep"
+    sleep 0.5
+    send "C-o"  # navigate into deep
+    sleep 1.2
+    wait_for "files>" 3 || true
+
+    assert_contains "L2: deep has nested.txt" "nested.txt"
+
+    # Switch to dirs to go deeper
+    send "C-/"
+    sleep 0.8
+    send "C-u"  # clear any leftover query
+    sleep 0.5
+    assert_contains "L2: dirs shows bottom" "bottom"
+
+    # --- Descend into sub/deep/bottom/ ---
+    send "bottom"
+    sleep 0.5
+    send "C-o"
+    sleep 1.2
+    wait_for "files>" 3 || true
+
+    assert_contains "L3: bottom has floor.txt" "floor.txt"
+
+    # --- Now ascend back up: C-l ---
+    send "C-l"  # up from bottom → deep
+    sleep 1.2
+    wait_for "files>" 3 || true
+    assert_contains "L2 back: deep has nested.txt" "nested.txt"
+
+    send "C-l"  # up from deep → sub
+    sleep 1.2
+    wait_for "files>" 3 || true
+    assert_contains "L1 back: sub has mid.txt" "mid.txt"
+
+    send "C-l"  # up from sub → root
+    sleep 1.2
+    wait_for "files>" 3 || true
+    assert_contains "L0 back: root has README" "README.md"
+    assert_contains "L0 back: root has Main.hs" "Main.hs"
+
+    send "C-g"
+    sleep 0.3
+}
+
+test_navigate_alt_l_into_top() {
+    echo "# test_navigate_alt_l_into_top"
+    launch_fzfx
+    wait_for "files>" 3 || true
+
+    # Switch to dirs mode
+    send "C-/"
+    sleep 0.8
+
+    # Select "sub" (which has sub/deep/bottom structure)
+    # alt-l (into_top) should navigate into just the top-level dir component
+    send "C-u"
+    sleep 0.2
+    send "sub"
+    sleep 0.5
+    send "M-l"  # alt-l = into_top
+    sleep 1.2
+    wait_for "files>" 3 || true
+
+    # into_top stays in dirs mode — should show sub's subdirectories
+    assert_prompt "into_top: dirs prompt" "dirs>"
+    assert_contains "into_top: sub has deep dir" "deep"
+
+    # Navigate back to root
+    send "C-l"
+    sleep 1.2
+    assert_prompt "into_top back: dirs prompt" "dirs>"
+    assert_contains "into_top back: root has sub dir" "sub"
+
+    send "C-g"
+    sleep 0.3
+}
+
+test_navigate_ctrl_r_to_root() {
+    echo "# test_navigate_ctrl_r_to_root"
+    launch_fzfx
+    wait_for "files>" 3 || true
+
+    # Navigate into sub/deep
+    send "C-/"
+    sleep 0.8
+    send "C-u"
+    sleep 0.2
+    send "sub"
+    sleep 0.5
+    send "C-o"
+    sleep 1.2
+    send "C-/"
+    sleep 0.8
+    send "C-u"
+    sleep 0.2
+    send "deep"
+    sleep 0.5
+    send "C-o"
+    sleep 1.2
+    wait_for "files>" 3 || true
+    assert_contains "in deep: has nested.txt" "nested.txt"
+
+    # C-r should jump straight to git root
+    send "C-r"
+    sleep 1.2
+    wait_for "files>" 3 || true
+    assert_contains "ctrl-r: back at root with README" "README.md"
+    assert_contains "ctrl-r: back at root with Main.hs" "Main.hs"
+
+    send "C-g"
+    sleep 0.3
+}
+
 # ═══════════════════════════════════════════════════════════════════════
 # Runner
 # ═══════════════════════════════════════════════════════════════════════
@@ -341,6 +493,9 @@ main() {
     test_swap_query_format
     test_diff_preview_toggle
     test_status_filter
+    test_progressive_navigate_down_and_up
+    test_navigate_alt_l_into_top
+    test_navigate_ctrl_r_to_root
 
     echo ""
     echo "$PASSED/$((PASSED + FAILED)) integration tests passed"

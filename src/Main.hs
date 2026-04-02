@@ -370,13 +370,10 @@ saveQueryStack gitRoot stack
 
 cmdQueryPush :: Text -> IO ()
 cmdQueryPush q = do
-    c <- loadConfig
-    let stack = cQueryStack c
-        stack' = if T.null q || (not (null stack) && head stack == q)
-                    then stack
-                    else q : stack
-    void $ modConfig $ \x -> x{cQueryStack = stack'}
-    saveQueryStack (cGit c) stack'
+    cfg <- loadConfig
+    let (cfg', _actions) = transition cfg (EvQueryPush q)
+    saveConfig cfg'
+    saveQueryStack (cGit cfg') (cQueryStack cfg')
 
 -- SQueryPop has two phases:
 -- Phase 1 (execute): show nested fzf, write selection to config as cPendingQuery
@@ -423,10 +420,10 @@ cmdQueryApply = do
 
 cmdQueryDelete :: Text -> IO ()
 cmdQueryDelete q = do
-    c <- loadConfig
-    let stack' = filter (/= q) (cQueryStack c)
-    void $ modConfig $ \x -> x{cQueryStack = stack'}
-    saveQueryStack (cGit c) stack'
+    cfg <- loadConfig
+    let (cfg', _actions) = transition cfg (EvQueryDelete q)
+    saveConfig cfg'
+    saveQueryStack (cGit cfg') (cQueryStack cfg')
 
 cmdQueryList :: IO ()
 cmdQueryList = do
@@ -461,17 +458,11 @@ cmdSelRestore = do
         TIO.putStr actions
         hFlush stdout
 
--- | Smart enter: in dirs mode, navigate into. In files mode, accept (enter) or edit (alt-enter).
--- Outputs fzf action strings with {} and {q} placeholders for fzf to expand.
 cmdSmartEnter :: Text -> IO ()
 cmdSmartEnter args = do
-    c <- loadConfig
-    let isAlt = args == "--alt"
-    if cFd c == FdDirs
-        then TIO.putStr $ "become:" <> cSelf c <> " " <> flg SNavigate <> " into {} {q}"
-        else if isAlt
-            then TIO.putStr $ "execute(" <> cSelf c <> " " <> flg SEdit <> " {})"
-            else TIO.putStr "accept"
+    cfg <- loadConfig
+    let (_cfg', actions) = transition cfg (EvSmartEnter (args == "--alt"))
+    TIO.putStr (renderActions actions)
     hFlush stdout
 
 cmdEdit :: Text -> IO ()
@@ -553,16 +544,12 @@ cmdDebug = withCfg $ \cfg -> do
             pad n s = s <> T.replicate (max 0 (n - T.length s)) " "
         in map (\(f, desc, v) -> pad 7 f <> pad 14 desc <> " = " <> v) fields
 
--- | Swap between #rg#filter and filter#rg query formats
 cmdSwap :: Text -> IO ()
 cmdSwap q = do
-    let swapped = case parseQuery q of
-            RgLive pat _     -> pat <> "#"
-            RgLocked pat f _ -> f <> "#" <> pat
-            FzfRg f pat _    -> "#" <> pat <> "#" <> f
-            FzfRgPending f   -> "#" <> f
-            FileMode         -> q <> "#"
-    TIO.putStr ("change-query(" <> swapped <> ")") >> hFlush stdout
+    cfg <- loadConfig
+    let (_cfg', actions) = transition cfg (EvSwap q)
+    TIO.putStr (renderActions actions)
+    hFlush stdout
 
 cmdMagit :: Text -> IO ()
 cmdMagit line = withCfg $ \_ ->
@@ -580,93 +567,31 @@ cmdCopy line = do
             proc "tmux" ["load-buffer", "-w", "-"]
 
 cmdTransform :: Text -> IO ()
-cmdTransform q = withCfg $ \Config{..} -> do
-    let rl = cSelf <> " " <> flg SReload <> " {q}"
-        isRg = case parseQuery q of FileMode -> False; _ -> True
-        wasRg = cWasRg
-    when (isRg && cFd == FdDirs) $
-        void $ modConfig $ \x -> x{cFd = FdFiles}
-    void $ modConfig $ \x -> x{cWasRg = isRg}
-    let nFd = if isRg then FdFiles else cFd
-        hdrUpd = if isRg && cFd == FdDirs
-            then let c' = Config{cFd = FdFiles, ..} in "+change-header(" <> hdrText c' <> ")"
-            else ""
-        act = case parseQuery q of
-            FileMode
-                | wasRg -> "change-prompt(" <> (if nFd == FdDirs then "dirs" else "files") <> "> )+enable-search+reload-sync(" <> rl <> ")"
-                | otherwise -> "change-prompt(" <> (if nFd == FdDirs then "dirs" else "files") <> "> )+enable-search"
-            RgLive{} -> "change-prompt(rg> )+disable-search+reload-sync(" <> rl <> ")"
-            RgLocked{} -> "change-prompt(filter> )+disable-search+reload-sync(" <> rl <> ")"
-            FzfRg{} -> "change-prompt(fzf#rg> )+disable-search+reload-sync(" <> rl <> ")"
-            FzfRgPending{} -> "change-prompt(fzf#> )+disable-search+reload-sync(" <> rl <> ")"
-    TIO.putStr (act <> hdrUpd) >> hFlush stdout
-
-hdrText :: Config -> Text
-hdrText Config{..} =
-    let on  s = "\ESC[1;32m" <> s <> "\ESC[0m"
-        off s = "\ESC[2m" <> s <> "\ESC[0m"
-        dim s = "\ESC[2m" <> s <> "\ESC[0m"
-        tog True  = on
-        tog False = off
-        sep = " \x2502 "
-        tilde p = maybe p ("~/" <>) $ T.stripPrefix "/home/" p >>= (T.stripPrefix "/" . T.dropWhile (/= '/'))
-        navLine
-            | cFd == FdDirs = "\n" <> dim ("cwd: " <> tilde cCwd)
-            | cCwd == cOrig = ""
-            | otherwise = "\n" <> dim ("cwd: " <> tilde cCwd <> "  (from " <> tilde cOrig <> ")")
-    in  T.intercalate sep
-        [ "C-/ " <> (if cFd == FdFiles then on "files" else off "files")
-            <> "/" <> (if cFd == FdDirs then on "dirs" else off "dirs")
-        , "M-h " <> tog cHid "hid"
-        , "M-i " <> tog cIgn "ign"
-        , "M-p prev"
-        , "M-u/s/?"
-        , "M-g " <> (if cPrev == Diff then on "diff" else off "diff")
-        , "M-a " <> tog cAt "@"
-        ] <> navLine
+cmdTransform q = withCfg $ \cfg -> do
+    let (cfg', actions) = transition cfg (EvTransform q)
+    saveConfig cfg'
+    TIO.putStr (renderActions actions)
+    hFlush stdout
 
 cmdToggle :: Text -> IO ()
 cmdToggle nameAndArgs = do
-    c <- loadConfig
+    cfg <- loadConfig
     let (name, curQ) = case T.breakOn " " nameAndArgs of
             (n, rest) -> (n, T.drop 1 rest)
-        rl = "reload-sync(" <> cSelf c <> " " <> flg SReload <> " {q})"
-        hdr c' = "+change-header(" <> hdrText c' <> ")"
-    case name of
-        "at_prefix" -> do
-            let c' = c{cAt = not (cAt c)}
-            void $ modConfig $ \x -> x{cAt = cAt c'}
-            TIO.putStr $ "change-header(" <> hdrText c' <> ")"
-        "diff" -> do
-            let c' = c{cPrev = if cPrev c == Content then Diff else Content}
-            void $ modConfig $ \x -> x{cPrev = cPrev c'}
-            TIO.putStr $ "refresh-preview" <> hdr c'
-        "hidden" -> do
-            let c' = c{cHid = not (cHid c)}
-            void $ modConfig $ \x -> x{cHid = cHid c'}
-            TIO.putStr $ rl <> hdr c'
-        "no_ignore" -> do
-            let c' = c{cIgn = not (cIgn c)}
-            void $ modConfig $ \x -> x{cIgn = cIgn c'}
-            TIO.putStr $ rl <> hdr c'
-        "type_toggle" -> do
-            let target = if cFd c == FdFiles then "type_d" else "type_f"
-            cmdToggle (target <> " " <> curQ)
-        "type_d" | cFd c /= FdDirs -> do
-            let c' = c{cFd = FdDirs, cFileQuery = curQ, cDirQuery = cDirQuery c}
-                restoreQ = cDirQuery c
-                rlQ = "reload-sync(" <> cSelf c <> " " <> flg SReload <> " " <> restoreQ <> ")"
-            void $ modConfig $ \x -> x{cFd = FdDirs, cFileQuery = curQ}
-            let resetPos = if T.null restoreQ then "+first" else ""
-            TIO.putStr $ rlQ <> "+change-prompt(dirs> )+change-query(" <> restoreQ <> ")" <> resetPos <> hdr c'
-        "type_f" | cFd c /= FdFiles -> do
-            let c' = c{cFd = FdFiles, cDirQuery = curQ, cFileQuery = cFileQuery c}
-                restoreQ = cFileQuery c
-                rlQ = "reload-sync(" <> cSelf c <> " " <> flg SReload <> " " <> restoreQ <> ")"
-            void $ modConfig $ \x -> x{cFd = FdFiles, cDirQuery = curQ}
-            TIO.putStr $ rlQ <> "+change-prompt(files> )+change-query(" <> restoreQ <> ")" <> hdr c'
-        _ -> pure ()
-    hFlush stdout
+        tgName = case name of
+            "at_prefix"   -> TgAtPrefix
+            "diff"        -> TgDiff
+            "hidden"      -> TgHidden
+            "no_ignore"   -> TgNoIgnore
+            "type_toggle" -> TgType
+            "type_d"      -> TgTypeD
+            "type_f"      -> TgTypeF
+            _             -> TgAtPrefix  -- fallback, no-op if already matching
+        (cfg', actions) = transition cfg (EvToggle tgName curQ)
+    unless (null actions) $ do
+        saveConfig cfg'
+        TIO.putStr (renderActions actions)
+        hFlush stdout
 
 cmdNavigate :: Text -> Text -> Text -> IO ()
 cmdNavigate navAction sel query = do
