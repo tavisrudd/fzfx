@@ -61,6 +61,7 @@ dispatch sub rest = case sub of
     SSelSave -> cmdSelSave (toArg rest)
     SSelRestore -> cmdSelRestore
     SSmartEnter -> cmdSmartEnter (toArg rest)
+    SExtraArgs -> cmdExtraArgs (toArg rest)
   where
     toArg = T.pack . unwords
 
@@ -551,6 +552,13 @@ cmdSwap q = do
     TIO.putStr (renderActions actions)
     hFlush stdout
 
+cmdExtraArgs :: Text -> IO ()
+cmdExtraArgs q = do
+    cfg <- loadConfig
+    let (_cfg', actions) = transition cfg (EvExtraArgs q)
+    unless (null actions) $ TIO.putStr (renderActions actions)
+    hFlush stdout
+
 cmdMagit :: Text -> IO ()
 cmdMagit line = withCfg $ \_ ->
     exec "magit-file-status" [lineFile (parseLine line)]
@@ -752,7 +760,7 @@ fzfArgs cfg@Config{..} = baseOpts <> selfBindings <> staticBindings
         , bind "shift-tab" "toggle+down+end-of-line+unix-line-discard"
         , bind "ctrl-k" "kill-line"
         , bind "alt-k" "clear-query"
-        , bind "alt--" "transform:q={q}; case $q in \\#*) printf change-query:{q}\\ --\\ -;; esac"
+        , xf cfg "alt--" SExtraArgs "{q}"
         , bind "alt-3" "transform:q={q}; case $q in \\#*) ;; *) printf change-query\\(\\#{q}\\)+beginning-of-line+forward-char;; esac"
         , bind "alt-b" "backward-word"
         , bind "alt-f" "forward-word"

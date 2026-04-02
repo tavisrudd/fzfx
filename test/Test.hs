@@ -49,6 +49,7 @@ main = runTests $ concat
     , transitionToggleTests
     , transitionTransformTests
     , transitionSwapTests
+    , transitionExtraArgsTests
     , transitionSmartEnterTests
     , transitionQueryTests
     , renderActionsTests
@@ -608,6 +609,45 @@ transitionSwapTests =
 
     , test "swap: does not modify config" $
         let (cfg', _) = transition testCfg (EvSwap "hello")
+        in cfg' == testCfg
+    ]
+
+-- ═══════════════════════════════════════════════════════════════════════
+-- Transition: ExtraArgs
+-- ═══════════════════════════════════════════════════════════════════════
+
+transitionExtraArgsTests :: [TestResult]
+transitionExtraArgsTests =
+    [ test "extraArgs: #pattern → #pattern -- -" $
+        let (_, acts) = transition testCfg (EvExtraArgs "#pattern")
+        in acts == [ChangeQuery "#pattern -- -"]
+
+    , test "extraArgs: #pat#filt → #pat -- -#filt" $
+        let (_, acts) = transition testCfg (EvExtraArgs "#pat#filt")
+        in acts == [ChangeQuery "#pat -- -#filt"]
+
+    , test "extraArgs: #pat#filt with spaces → preserves filter" $
+        let (_, acts) = transition testCfg (EvExtraArgs "#search term#my filter")
+        in acts == [ChangeQuery "#search term -- -#my filter"]
+
+    , test "extraArgs: foo#bar (fzfRg) → foo#bar -- -" $
+        let (_, acts) = transition testCfg (EvExtraArgs "foo#bar")
+        in acts == [ChangeQuery "foo#bar -- -"]
+
+    , test "extraArgs: foo# (pending) → no-op" $
+        let (_, acts) = transition testCfg (EvExtraArgs "foo#")
+        in null acts
+
+    , test "extraArgs: plain query → no-op" $
+        let (_, acts) = transition testCfg (EvExtraArgs "hello")
+        in null acts
+
+    , test "extraArgs: empty → no-op" $
+        let (_, acts) = transition testCfg (EvExtraArgs "")
+        in null acts
+
+    , test "extraArgs: does not modify config" $
+        let (cfg', _) = transition testCfg (EvExtraArgs "#pat")
         in cfg' == testCfg
     ]
 

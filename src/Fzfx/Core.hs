@@ -118,6 +118,7 @@ data Subcmd
     | SSelSave
     | SSelRestore
     | SSmartEnter
+    | SExtraArgs
     deriving (Eq, Enum, Bounded, Show)
 
 flg :: Subcmd -> Text
@@ -142,6 +143,7 @@ flg = \case
     SSelSave -> "--sel-save"
     SSelRestore -> "--sel-restore"
     SSmartEnter -> "--smart-enter"
+    SExtraArgs -> "--extra-args"
 
 parseSubcmd :: String -> Maybe Subcmd
 parseSubcmd s = lookup s [(T.unpack (flg c), c) | c <- [minBound .. maxBound]]
@@ -368,6 +370,7 @@ data Event
     = EvToggle ToggleName Text  -- toggle name, current query
     | EvTransform Text          -- query changed (the query text)
     | EvSwap Text               -- swap query format
+    | EvExtraArgs Text          -- insert " -- " for extra rg args
     | EvSmartEnter Bool         -- is alt-enter?
     | EvQueryPush Text          -- save query to stack
     | EvQueryDelete Text        -- remove query from stack
@@ -473,6 +476,25 @@ transition cfg (EvTransform q) =
             FzfRg{} -> [ChangePrompt "fzf#rg> ", DisableSearch, reloadAction cfg']
             FzfRgPending{} -> [ChangePrompt "fzf#> ", DisableSearch, reloadAction cfg']
     in (cfg', act <> hdrUpd)
+
+-- ExtraArgs: insert " -- " at the right position for rg extra args
+transition cfg (EvExtraArgs q) =
+    let result = case parseQuery q of
+            RgLive _ _  -> Just (q <> " -- -")
+            RgLocked pat _ _ ->
+                -- Insert before the second # : #pat → #pat -- -#filter
+                case T.stripPrefix "#" q of
+                    Just body -> case T.breakOn "#" body of
+                        (before, rest) | not (T.null rest) ->
+                            Just ("#" <> before <> " -- -" <> rest)
+                        _ -> Just (q <> " -- -")
+                    Nothing -> Nothing
+            FzfRg _ _ _    -> Just (q <> " -- -")
+            FzfRgPending _ -> Nothing  -- no rg pattern yet
+            FileMode       -> Nothing  -- not in rg mode
+    in case result of
+        Just q' -> (cfg, [ChangeQuery q'])
+        Nothing -> (cfg, [])
 
 -- Swap: switch between #rg#filter and filter#rg query formats
 transition cfg (EvSwap q) =
