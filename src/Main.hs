@@ -30,8 +30,8 @@ import System.Directory (
     setCurrentDirectory,
  )
 import System.Environment (getArgs, getExecutablePath, lookupEnv, setEnv)
-import System.Exit (exitWith)
-import System.FilePath (isAbsolute, isRelative, splitDirectories, takeDirectory, takeExtension, (</>))
+import System.Exit (ExitCode(..), exitSuccess, exitWith)
+import System.FilePath (isAbsolute, isRelative, pathSeparator, splitDirectories, takeDirectory, takeExtension, (</>))
 import System.FilePath qualified as FP
 import System.IO (IOMode(..), hClose, hFlush, openFile, readFile', stdout)
 import System.Posix.IO (dupTo, stdError, stdInput, stdOutput)
@@ -89,6 +89,7 @@ data Subcmd
     | SQueryList
     | SSelSave
     | SSelRestore
+    | SSmartEnter
     deriving (Eq, Enum, Bounded)
 
 flg :: Subcmd -> Text
@@ -112,6 +113,7 @@ flg = \case
     SQueryList -> "--query-list"
     SSelSave -> "--sel-save"
     SSelRestore -> "--sel-restore"
+    SSmartEnter -> "--smart-enter"
 
 parseSubcmd :: String -> Maybe Subcmd
 parseSubcmd s = lookup s [(T.unpack (flg c), c) | c <- [minBound .. maxBound]]
@@ -139,6 +141,7 @@ dispatch sub rest = case sub of
     SQueryList -> cmdQueryList
     SSelSave -> cmdSelSave (toArg rest)
     SSelRestore -> cmdSelRestore
+    SSmartEnter -> cmdSmartEnter (toArg rest)
   where
     toArg = T.pack . unwords
 
@@ -399,7 +402,9 @@ reloadFiles Config{..} query = do
         savedSel = case cFd of
             FdFiles -> Set.fromList cSavedFileSel
             FdDirs -> Set.fromList cSavedDirSel
-        positions = [showT i | (i, (_, f)) <- zip [1 :: Int ..] final, Set.member f savedSel]
+    cwd <- T.pack <$> getCurrentDirectory
+    let toAbs f = if isAbsolute (t f) then f else T.pack (t cwd </> t f)
+        positions = [showT i | (i, (_, f)) <- zip [1 :: Int ..] final, Set.member (toAbs f) savedSel]
     unless (null positions) $ do
         let posFile = t cDir </> "sel-positions"
         writeFile posFile (T.unpack (T.unlines positions))
@@ -463,10 +468,9 @@ reloadRgLocked pat filt ex = unless (T.null pat) $ do
     filtered <- if T.null filt then pure files
                 else do
                     let input = LBS.fromStrict $ TE.encodeUtf8 $ T.unlines files
-                    fout <- catch
-                        (decodeOut . fst <$> readProcess_ (setStdin (byteStringInput input) $ proc "fzf" ["--filter", t filt]))
-                        (\(_ :: IOException) -> pure "")
-                    pure $ filter (not . T.null) (T.lines fout)
+                    (_, fout, _) <- readProcess (setStdin (byteStringInput input) $ proc "fzf" ["--filter", t filt])
+                    let fout' = decodeOut fout
+                    pure $ filter (not . T.null) (T.lines fout')
     mapM_ (\f -> TIO.putStrLn (" \t" <> f)) filtered
     hFlush stdout
 
@@ -478,10 +482,9 @@ reloadFzfRg filt rgPat ex = unless (T.null rgPat) $ do
     targets <- if T.null filt then pure allFiles
                else do
                    let input = LBS.fromStrict $ TE.encodeUtf8 $ T.unlines allFiles
-                   fout <- catch
-                       (decodeOut . fst <$> readProcess_ (setStdin (byteStringInput input) $ proc "fzf" ["--filter", t filt]))
-                       (\(_ :: IOException) -> pure "")
-                   pure $ filter (not . T.null) (T.lines fout)
+                   (_, fout, _) <- readProcess (setStdin (byteStringInput input) $ proc "fzf" ["--filter", t filt])
+                   let fout' = decodeOut fout
+                   pure $ filter (not . T.null) (T.lines fout')
     unless (null targets) $ do
         let rgArgs = ["--column", "--line-number", "--no-heading", "--color=always", "--smart-case"]
                 <> ex <> ["--", rgPat] <> targets
@@ -494,10 +497,9 @@ reloadFzfRgPending filt = do
     filtered <- if T.null filt then pure allFiles
                 else do
                     let input = LBS.fromStrict $ TE.encodeUtf8 $ T.unlines allFiles
-                    fout <- catch
-                        (decodeOut . fst <$> readProcess_ (setStdin (byteStringInput input) $ proc "fzf" ["--filter", t filt]))
-                        (\(_ :: IOException) -> pure "")
-                    pure $ filter (not . T.null) (T.lines fout)
+                    (_, fout, _) <- readProcess (setStdin (byteStringInput input) $ proc "fzf" ["--filter", t filt])
+                    let fout' = decodeOut fout
+                    pure $ filter (not . T.null) (T.lines fout')
     mapM_ (\f -> TIO.putStrLn (" \t" <> f)) filtered
     hFlush stdout
 
@@ -576,7 +578,7 @@ queryStackDir = do
 queryStackFile :: Text -> IO FilePath
 queryStackFile gitRoot = do
     dir <- queryStackDir
-    let name = map (\c -> if c == '/' then '_' else c) (t gitRoot)
+    let name = map (\c -> if c == pathSeparator then '_' else c) (t gitRoot)
     pure $ dir </> name
 
 loadQueryStack :: Text -> IO [Text]
@@ -616,7 +618,7 @@ cmdQueryPop = do
         [] -> pure ()
         stack -> do
             let self = t (cSelf c)
-                preview = self <> " " <> t (flg SReload) <> " {} | fzf --filter {}"
+                preview = self <> " " <> t (flg SReload) <> " {} | fzf --filter {} || true"
                 del = "execute-silent(" <> self <> " " <> t (flg SQueryDelete) <> " {})"
                     <> "+reload-sync(" <> self <> " " <> t (flg SQueryList) <> ")"
                 fzfProc = setStdin (byteStringInput (LBS.fromStrict (TE.encodeUtf8 (T.intercalate "\n" stack))))
@@ -667,10 +669,12 @@ cmdQueryList = do
 cmdSelSave :: Text -> IO ()
 cmdSelSave mode = do
     input <- TIO.getContents
+    cwd <- T.pack <$> getCurrentDirectory
     let paths = filter (not . T.null) $ T.lines input
+        absPaths = map (\p -> if isAbsolute (t p) then p else T.pack (t cwd </> t p)) paths
     case mode of
-        "file" -> void $ modConfig $ \x -> x{cSavedFileSel = paths}
-        "dir" -> void $ modConfig $ \x -> x{cSavedDirSel = paths}
+        "file" -> void $ modConfig $ \x -> x{cSavedFileSel = absPaths}
+        "dir" -> void $ modConfig $ \x -> x{cSavedDirSel = absPaths}
         _ -> pure ()
 
 -- | Restore saved selections after a mode switch reload.
@@ -686,6 +690,19 @@ cmdSelRestore = do
         let actions = T.intercalate "+" $ concatMap (\p -> ["pos(" <> p <> ")", "select"]) positions
         TIO.putStr actions
         hFlush stdout
+
+-- | Smart enter: in dirs mode, navigate into. In files mode, accept (enter) or edit (alt-enter).
+-- Outputs fzf action strings with {} and {q} placeholders for fzf to expand.
+cmdSmartEnter :: Text -> IO ()
+cmdSmartEnter args = do
+    c <- loadConfig
+    let isAlt = args == "--alt"
+    if cFd c == FdDirs
+        then TIO.putStr $ "become:" <> cSelf c <> " " <> flg SNavigate <> " into {} {q}"
+        else if isAlt
+            then TIO.putStr $ "execute(" <> cSelf c <> " " <> flg SEdit <> " {})"
+            else TIO.putStr "accept"
+    hFlush stdout
 
 cmdEdit :: Text -> IO ()
 cmdEdit line = withCfg $ \_ -> do
@@ -731,7 +748,7 @@ cmdDebug = withCfg $ \cfg -> do
         in  [ "# toggles"
             , ""
             , "  " <> bold "M-a"   <> "  @ prefix    " <> if cAt then on "ON" else off "off"
-            , "  " <> bold "C-d"   <> "  type         " <> (if cFd == FdDirs then on "dirs" else off "dirs")
+            , "  " <> bold "C-/"   <> "  type         " <> (if cFd == FdDirs then on "dirs" else off "dirs")
                                                    <> " / " <> (if cFd == FdFiles then on "files" else off "files")
             , "  " <> bold "M-h"   <> "  hidden       " <> if cHid then on "ON" else off "off"
             , "  " <> bold "M-i"   <> "  no-ignore    " <> if cIgn then on "ON" else off "off"
@@ -828,11 +845,11 @@ hdrText Config{..} =
             | cCwd == cOrig = ""
             | otherwise = "\n" <> dim ("cwd: " <> tilde cCwd <> "  (from " <> tilde cOrig <> ")")
     in  T.intercalate sep
-        [ "C-" <> (if cFd == FdFiles then on "f" else off "f")
-            <> "/" <> (if cFd == FdDirs then on "d" else off "d")
+        [ "C-/ " <> (if cFd == FdFiles then on "files" else off "files")
+            <> "/" <> (if cFd == FdDirs then on "dirs" else off "dirs")
         , "M-h " <> tog cHid "hid"
         , "M-i " <> tog cIgn "ign"
-        , "C-/ prev"
+        , "M-p prev"
         , "M-u/s/?"
         , "M-g " <> (if cPrev == Diff then on "diff" else off "diff")
         , "M-a " <> tog cAt "@"
@@ -862,12 +879,16 @@ cmdToggle nameAndArgs = do
             let c' = c{cIgn = not (cIgn c)}
             void $ modConfig $ \x -> x{cIgn = cIgn c'}
             TIO.putStr $ rl <> hdr c'
+        "type_toggle" -> do
+            let target = if cFd c == FdFiles then "type_d" else "type_f"
+            cmdToggle (target <> " " <> curQ)
         "type_d" | cFd c /= FdDirs -> do
             let c' = c{cFd = FdDirs, cFileQuery = curQ, cDirQuery = cDirQuery c}
                 restoreQ = cDirQuery c
                 rlQ = "reload-sync(" <> cSelf c <> " " <> flg SReload <> " " <> restoreQ <> ")"
             void $ modConfig $ \x -> x{cFd = FdDirs, cFileQuery = curQ}
-            TIO.putStr $ rlQ <> "+change-prompt(dirs> )+change-query(" <> restoreQ <> ")" <> hdr c'
+            let resetPos = if T.null restoreQ then "+first" else ""
+            TIO.putStr $ rlQ <> "+change-prompt(dirs> )+change-query(" <> restoreQ <> ")" <> resetPos <> hdr c'
         "type_f" | cFd c /= FdFiles -> do
             let c' = c{cFd = FdFiles, cDirQuery = curQ, cFileQuery = cFileQuery c}
                 restoreQ = cFileQuery c
@@ -880,30 +901,65 @@ cmdToggle nameAndArgs = do
 cmdNavigate :: Text -> Text -> Text -> IO ()
 cmdNavigate navAction sel query = do
     Config{..} <- loadConfig
-    let sp = T.dropWhileEnd (== '/') $ lineFile (parseLine sel)
+    let sp = T.dropWhileEnd (== pathSeparator) $ lineFile (parseLine sel)
     nCwd <- case navAction of
         "into" -> do
-            d <- doesDirectoryExist (t cCwd </> t sp)
-            pure $
-                if d
-                    then cCwd <> "/" <> sp
-                    else T.pack (takeDirectory (t cCwd </> t sp))
+            let target = t cCwd </> t sp
+            d <- doesDirectoryExist target
+            pure $ T.pack $
+                if d then target
+                     else takeDirectory target
+        "into_top" -> do
+            let topDir = case splitDirectories (t sp) of
+                    (d : _) -> d
+                    _ -> ""
+                target = t cCwd </> topDir
+            d <- doesDirectoryExist target
+            pure $ if d && not (null topDir)
+                then T.pack target
+                else cCwd
         "up" -> pure $ T.pack (takeDirectory (t cCwd))
-        "root" -> pure $ if T.null cGit then cCwd else cGit
+        "root" -> do
+            origGit <- detectGit cOrig
+            pure $ if T.null origGit then cOrig else origGit
         "toggle_root" -> pure cOrig
         _ -> pure cCwd
-    nGit <- detectGit nCwd
+    let nCwd' = T.dropWhileEnd (== pathSeparator) $ T.pack $ FP.normalise $ t nCwd
+    nGit <- detectGit nCwd'
     let nFd = if navAction == "into" then FdFiles else cFd
-        nQuery = if navAction == "into" && cFd == FdDirs then cFileQuery else query
+        -- Dir segments that will disappear after navigation
+        vanishingDirs = case navAction of
+            "into" -> map T.pack $ splitDirectories (t sp)
+            "into_top" -> case splitDirectories (t sp) of { (d:_) -> [T.pack d]; _ -> [] }
+            _ -> []
+    -- Use fzf --filter to check each query chunk against vanishing dir segments
+    baseQuery <- if null vanishingDirs || T.null query
+        then pure query
+        else do
+            let dirInput = LBS.fromStrict $ TE.encodeUtf8 $ T.unlines vanishingDirs
+                chunks = T.words query
+                checkChunk chunk = do
+                    (ec, out, _) <- readProcess
+                        $ setStdin (byteStringInput dirInput)
+                        $ proc "fzf" ["--filter", t chunk, "--no-sort"]
+                    pure $ case ec of
+                        ExitSuccess -> not $ LBS.null out  -- matches found → chunk matches dir
+                        _ -> False
+            matches <- mapM (\c -> (c,) <$> checkChunk c) chunks
+            pure $ T.unwords [c | (c, matched) <- matches, not matched]
+    let
+        nQuery = if navAction == "into" && cFd == FdDirs then cFileQuery else baseQuery
         nFileQ = if navAction == "into" && cFd == FdDirs then cFileQuery else cFileQuery
         nDirQ = if navAction == "into" && cFd == FdDirs then query else cDirQuery
-    setEnv "_FZFX_CWD" (t nCwd)
+    setEnv "_FZFX_CWD" (t nCwd')
     setEnv "_FZFX_QUERY" (t nQuery)
     setEnv "_FZFX_AT_PREFIX" (if cAt then "1" else "0")
     setEnv "_FZFX_FDTYPE" (case nFd of FdFiles -> "f"; FdDirs -> "d")
     setEnv "_FZFX_HIDDEN" (if cHid then "--hidden" else "")
     setEnv "_FZFX_FILE_QUERY" (t nFileQ)
     setEnv "_FZFX_DIR_QUERY" (t nDirQ)
+    setEnv "_FZFX_SAVED_FILE_SEL" (t (T.intercalate "\n" cSavedFileSel))
+    setEnv "_FZFX_SAVED_DIR_SEL" (t (T.intercalate "\n" cSavedDirSel))
     setEnv "_FZFX_STATE_DIR" ""
     mainLaunch []
 
@@ -912,10 +968,10 @@ cmdNavigate navAction sel query = do
 makeRelPath :: Text -> Text -> Text -> Text
 makeRelPath orig cwd path
     | isAbsolute (t path) = path
-    | orig == cwd = path
+    | normOrig == normCwd = path
     | otherwise =
-        let absPath = t cwd </> t path
-            origParts = splitDirectories (t orig)
+        let absPath = FP.normalise $ t cwd </> t path
+            origParts = splitDirectories normOrig
             absParts = splitDirectories absPath
             common = length $ takeWhile id $ zipWith (==) origParts absParts
             ups = length origParts - common
@@ -924,6 +980,9 @@ makeRelPath orig cwd path
            then T.pack absPath
            else T.pack $ joinPath (replicate ups ".." <> rest)
   where
+    dropTrailingSep = reverse . dropWhile (== pathSeparator) . reverse
+    normOrig = dropTrailingSep $ FP.normalise (t orig)
+    normCwd = dropTrailingSep $ FP.normalise (t cwd)
     joinPath [] = "."
     joinPath ps = foldl1 (</>) ps
 
@@ -945,9 +1004,17 @@ xe :: Config -> Text -> Subcmd -> Text -> Text -> Text
 xe Config{..} key sub rest sfx =
     bind key $ "execute(" <> cSelf <> " " <> flg sub <> " " <> rest <> ")" <> sfx
 
+-- | Prefix that saves current tab-selections to config before an action.
+-- Uses FZF_SELECT_COUNT to avoid saving the cursor item when nothing is selected.
+selSavePrefix :: Config -> Text
+selSavePrefix Config{..} =
+    let mode = case cFd of FdFiles -> "file"; FdDirs -> "dir"
+    in "execute-silent([ \"$FZF_SELECT_COUNT\" -gt 0 ] && printf '%s\\n' {+2} | "
+       <> cSelf <> " " <> flg SSelSave <> " " <> mode <> ")+"
+
 bc :: Config -> Text -> Subcmd -> Text -> Text
-bc Config{..} key sub rest =
-    bind key $ "become:" <> cSelf <> " " <> flg sub <> " " <> rest
+bc cfg@Config{..} key sub rest =
+    bind key $ selSavePrefix cfg <> "become:" <> cSelf <> " " <> flg sub <> " " <> rest
 
 -- | Status toggle: prepend/remove/replace status prefix in query
 statusToggle :: Text -> Text
@@ -974,6 +1041,7 @@ fzfArgs cfg@Config{..} = baseOpts <> selfBindings <> staticBindings
         , "--tiebreak=index"
         , "--multi"
         , "--delimiter=\t"
+        , "--tabstop=4"
         , "--with-nth=1,2"
         , "--id-nth=2"
         , "--header=" <> hdrText cfg
@@ -992,13 +1060,15 @@ fzfArgs cfg@Config{..} = baseOpts <> selfBindings <> staticBindings
         , bind "alt-?" (statusToggle "?")
         , xf cfg "alt-h" SToggle "hidden"
         , xf cfg "alt-i" SToggle "no_ignore"
-        , bind "ctrl-d" ("execute-silent([ \"$FZF_SELECT_COUNT\" -gt 0 ] && printf '%s\\n' {+2} | " <> cSelf <> " " <> flg SSelSave <> " file)+transform:" <> cSelf <> " " <> flg SToggle <> " type_d {q}")
-        , bind "ctrl-f" ("execute-silent([ \"$FZF_SELECT_COUNT\" -gt 0 ] && printf '%s\\n' {+2} | " <> cSelf <> " " <> flg SSelSave <> " dir)+transform:" <> cSelf <> " " <> flg SToggle <> " type_f {q}")
+        , bind "ctrl-/" (selSavePrefix cfg <> "transform:" <> cSelf <> " " <> flg SToggle <> " type_toggle {q}")
         , bc cfg "ctrl-o" SNavigate "into {} {q}"
+        , bc cfg "alt-o" SNavigate "into_top {} {q}"
+        , bc cfg "alt-l" SNavigate "into_top {} {q}"
         , bc cfg "ctrl-l" SNavigate "up {} {q}"
         , bc cfg "ctrl-r" SNavigate "root {} {q}"
         , bc cfg "alt-." SNavigate "toggle_root {} {q}"
-        , bc cfg "alt-enter" SEdit "{}"
+        , bind "enter" (selSavePrefix cfg <> "transform:" <> cSelf <> " " <> flg SSmartEnter)
+        , bind "alt-enter" (selSavePrefix cfg <> "transform:" <> cSelf <> " " <> flg SSmartEnter <> " --alt")
         , xe cfg "alt-," SMagit "{}" "+abort"
         , xe cfg "alt-c" SCopy "{}" "+abort"
         , xe cfg "ctrl-alt-l" SForgit "{}" ""
@@ -1014,7 +1084,7 @@ fzfArgs cfg@Config{..} = baseOpts <> selfBindings <> staticBindings
         , bind "alt-3" "transform:q={q}; case $q in \\#*) ;; *) printf change-query\\(\\#{q}\\)+beginning-of-line+forward-char;; esac"
         , bind "alt-b" "backward-word"
         , bind "alt-f" "forward-word"
-        , bind "ctrl-/" "toggle-preview"
+        , bind "alt-p" "toggle-preview"
         , bind "alt-;" "change-preview-window(up,99%,border-bottom|right,50%,border-left)"
         , bind "alt-{" "preview-half-page-up"
         , bind "alt-}" "preview-half-page-down"
@@ -1035,11 +1105,16 @@ fzfArgs cfg@Config{..} = baseOpts <> selfBindings <> staticBindings
 
 outputResults :: Config -> [Text] -> IO ()
 outputResults Config{..} sel = do
-    let parsed = map parseLine sel
-        resolve li = case li of
-            RgLine f ln -> makeRelPath cOrig cCwd f <> ":" <> showT ln
-            FdLine _ p -> makeRelPath cOrig cCwd p
-        files = dedup $ sort $ map resolve parsed
+    let -- Lines with tabs are raw fzf output (need resolving via makeRelPath).
+        -- Lines without tabs came from an inner mainLaunch via become: chain
+        -- and are already resolved — pass them through unchanged.
+        isFzfLine = T.isInfixOf "\t"
+        resolve line
+            | isFzfLine line = case parseLine line of
+                RgLine f ln -> makeRelPath cOrig cCwd f <> ":" <> showT ln
+                FdLine _ p -> makeRelPath cOrig cCwd p
+            | otherwise = line
+        files = dedup $ sort $ map resolve sel
     case cOut of
         OStdout -> mapM_ TIO.putStrLn files
         OTmux -> do
@@ -1095,9 +1170,9 @@ printHelp = TIO.putStr $ T.unlines
     , "  alt-.           go to original directory"
     , "  alt-h           show/hide hidden files"
     , "  alt-i           toggle no-ignore"
-    , "  ctrl-d / ctrl-f switch to dirs/files"
+    , "  ctrl-/          toggle files/dirs"
     , "  alt-u/s/?       filter by git status"
-    , "  ctrl-/          toggle preview"
+    , "  alt-p           toggle preview"
     , "  alt-;           cycle preview layout"
     , "  f4              push query to stack"
     , "  f3              browse/restore query stack"
@@ -1149,9 +1224,13 @@ mainLaunch rest = do
     pid <- getProcessID
     fqEnv <- envOr "_FZFX_FILE_QUERY" ""
     dqEnv <- envOr "_FZFX_DIR_QUERY" ""
+    fSelEnv <- envOr "_FZFX_SAVED_FILE_SEL" ""
+    dSelEnv <- envOr "_FZFX_SAVED_DIR_SEL" ""
     let sd = T.pack $ tmp </> "fzfx-" <> show pid
         fq = if T.null fqEnv then (if fd == FdFiles then q else "") else fqEnv
         dq = if T.null dqEnv then (if fd == FdDirs then q else "") else dqEnv
+        fSel = if T.null fSelEnv then [] else filter (not . T.null) (T.lines fSelEnv)
+        dSel = if T.null dSelEnv then [] else filter (not . T.null) (T.lines dSelEnv)
     persistedStack <- loadQueryStack git
     let cfg = Config
             { cDir = sd, cGit = git, cOrig = orig, cCwd = cwd, cPane = pane
@@ -1159,7 +1238,7 @@ mainLaunch rest = do
             , cHid = hid, cIgn = False, cPrev = Content
             , cFileQuery = fq, cDirQuery = dq
             , cQueryStack = persistedStack, cPendingQuery = "", cWasRg = False
-            , cSavedFileSel = [], cSavedDirSel = []
+            , cSavedFileSel = fSel, cSavedDirSel = dSel
             }
 
     setCurrentDirectory (t cwd)
