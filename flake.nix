@@ -16,7 +16,7 @@
           pkgs = nixpkgs.legacyPackages.${system};
         in
         {
-          default = pkgs.haskellPackages.callCabal2nix "fzfx" ./. {};
+          default = pkgs.haskellPackages.callCabal2nix "fzfx" (pkgs.lib.cleanSource ./.) {};
         }
       );
 

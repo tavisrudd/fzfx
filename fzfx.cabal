@@ -1,11 +1,28 @@
-cabal-version: 2.4
+cabal-version: 3.0
 name:          fzfx
 version:       0.1.0
 build-type:    Simple
 
+library fzfx-internal
+  exposed-modules: Fzfx.Core
+  hs-source-dirs:  src
+  default-language: GHC2021
+  default-extensions:
+    LambdaCase
+    OverloadedStrings
+    RecordWildCards
+  ghc-options:      -Wall
+  build-depends:
+    , base          >= 4.16 && < 5
+    , bytestring    >= 0.11
+    , containers    >= 0.6
+    , filepath      >= 1.4
+    , text          >= 2.0
+
 executable fzfx
   main-is:          Main.hs
   hs-source-dirs:   src
+  other-modules:    Fzfx.Core
   default-language: GHC2021
   default-extensions:
     LambdaCase
@@ -13,6 +30,7 @@ executable fzfx
     RecordWildCards
   ghc-options:      -Wall -O2
   build-depends:
+    , fzfx:fzfx-internal
     , base          >= 4.16 && < 5
     , bytestring    >= 0.11
     , containers    >= 0.6
@@ -32,5 +50,6 @@ test-suite fzfx-test
     OverloadedStrings
   ghc-options:      -Wall
   build-depends:
+    , fzfx:fzfx-internal
     , base >= 4.16 && < 5
     , text >= 2.0

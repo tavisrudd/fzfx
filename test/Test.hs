@@ -6,94 +6,16 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import System.Exit (exitFailure, exitSuccess)
 
--- Inline the pure functions under test (since Main doesn't export them)
+import Fzfx.Core
 
-data SearchMode
-    = FileMode
-    | RgLive Text [Text]
-    | RgLocked Text Text [Text]
-    | FzfRg Text Text [Text]
-    | FzfRgPending Text
-    deriving (Show)
+-- ═══════════════════════════════════════════════════════════════════════
+-- Test Runner
+-- ═══════════════════════════════════════════════════════════════════════
 
-data GitStatus = Unstaged | Staged | Untracked | Clean
-    deriving (Eq, Show)
-
-data LineInfo
-    = RgLine Text Int
-    | FdLine GitStatus Text
-    deriving (Eq, Show)
-
--- tryRg: parse from the left
-tryRg :: Text -> Maybe (Text, Int)
-tryRg s = case T.break (== ':') s of
-    (file, rest1) | not (T.null file), Just r1 <- T.stripPrefix ":" rest1 ->
-        case T.break (== ':') r1 of
-            (lnS, rest2) | isAllDigit lnS, Just r2 <- T.stripPrefix ":" rest2 ->
-                case T.break (== ':') r2 of
-                    (colS, rest3) | isAllDigit colS, not (T.null rest3) ->
-                        Just (file, read (T.unpack lnS))
-                    _ -> Nothing
-            _ -> Nothing
-    _ -> Nothing
-  where
-    isAllDigit s' = not (T.null s') && T.all (\c -> c >= '0' && c <= '9') s'
-
-stripAnsi :: Text -> Text
-stripAnsi txt
-    | T.null txt = txt
-    | T.head txt == '\ESC' = case T.uncons (T.tail txt) of
-        Just ('[', rest) -> stripAnsi (T.drop 1 (T.dropWhile (\c -> c < '@' || c > '~') rest))
-        Just (_, rest) -> stripAnsi rest
-        Nothing -> txt
-    | otherwise = T.cons (T.head txt) (stripAnsi (T.tail txt))
-
-parseLine :: Text -> LineInfo
-parseLine raw = case tryRg (stripAnsi raw) of
-    Just (f, ln) -> RgLine f ln
-    Nothing -> case T.breakOn "\t" raw of
-        (lbl, rest)
-            | not (T.null rest) -> FdLine (toSt (T.strip lbl)) (T.drop 1 rest)
-            | otherwise -> FdLine Clean (T.strip raw)
-  where
-    toSt "U" = Unstaged
-    toSt "S" = Staged
-    toSt "?" = Untracked
-    toSt _ = Clean
-
-parseQuery :: Text -> SearchMode
-parseQuery q
-    | "\\#" `T.isPrefixOf` q = FileMode
-    | Just body <- T.stripPrefix "#" q = case T.breakOn "#" body of
-        (p, rest)
-            | not (T.null rest) ->
-                let (pat, ex) = splitEx p
-                 in RgLocked pat (T.drop 1 rest) ex
-            | otherwise ->
-                let (pat, ex) = splitEx p
-                 in RgLive pat ex
-    | Just (filt, rgPat) <- parseFzfRg q =
-        if T.null (T.stripStart rgPat)
-        then FzfRgPending filt
-        else let (pat, ex) = splitEx rgPat
-              in FzfRg filt pat ex
-    | otherwise = FileMode
-  where
-    parseFzfRg s = case T.breakOn "#" s of
-        (before, rest)
-            | not (T.null before), not (T.null rest) ->
-                Just (T.strip before, T.drop 1 rest)
-            | otherwise -> Nothing
-    splitEx s = case T.breakOn " -- " s of
-        (p', rest')
-            | T.null rest' -> (T.strip p', [])
-            | otherwise -> (T.strip p', T.words (T.drop 4 rest'))
-
--- Test runner
 data TestResult = Pass | Fail String
 
 test :: String -> Bool -> TestResult
-test name True = Pass
+test _ True = Pass
 test name False = Fail name
 
 runTests :: [TestResult] -> IO ()
@@ -105,9 +27,33 @@ runTests results = do
     putStrLn $ show (total - failed) <> "/" <> show total <> " passed"
     if null failures then exitSuccess else exitFailure
 
+-- ═══════════════════════════════════════════════════════════════════════
+-- Tests
+-- ═══════════════════════════════════════════════════════════════════════
+
 main :: IO ()
-main = runTests
-    -- tryRg: basic rg line
+main = runTests $ concat
+    [ tryRgTests
+    , stripAnsiTests
+    , parseLineTests
+    , parseQueryTests
+    , parseSFilterTests
+    , lineAccessorTests
+    , makeRelPathTests
+    , interleaveTests
+    , ordNubTests
+    , gitStatusCharTests
+    , subcmdRoundtripTests
+    , configRoundtripTests
+    , showTTests
+    ]
+
+-- ═══════════════════════════════════════════════════════════════════════
+-- tryRg
+-- ═══════════════════════════════════════════════════════════════════════
+
+tryRgTests :: [TestResult]
+tryRgTests =
     [ test "tryRg basic" $
         tryRg "src/Main.hs:42:10:some code" == Just ("src/Main.hs", 42)
     , test "tryRg with colons in text" $
@@ -128,17 +74,46 @@ main = runTests
         tryRg "file:1:abc:text" == Nothing
     , test "tryRg trailing colon (empty text)" $
         tryRg "file:1:1:" == Just ("file", 1)
+    , test "tryRg path with dots" $
+        tryRg "./src/Foo.hs:10:3:code" == Just ("./src/Foo.hs", 10)
+    , test "tryRg large line number" $
+        tryRg "f:99999:1:x" == Just ("f", 99999)
+    , test "tryRg single char file" $
+        tryRg "f:1:1:x" == Just ("f", 1)
+    , test "tryRg missing text after col" $
+        tryRg "f:1:1" == Nothing
+    ]
 
-    -- stripAnsi
-    , test "stripAnsi plain" $
+-- ═══════════════════════════════════════════════════════════════════════
+-- stripAnsi
+-- ═══════════════════════════════════════════════════════════════════════
+
+stripAnsiTests :: [TestResult]
+stripAnsiTests =
+    [ test "stripAnsi plain" $
         stripAnsi "hello" == "hello"
     , test "stripAnsi with color" $
         stripAnsi "\ESC[31mred\ESC[0m" == "red"
     , test "stripAnsi with bold" $
         stripAnsi "\ESC[1;33mfoo\ESC[0m:bar" == "foo:bar"
+    , test "stripAnsi empty" $
+        stripAnsi "" == ""
+    , test "stripAnsi nested colors" $
+        stripAnsi "\ESC[1m\ESC[35mfile\ESC[0m:\ESC[32m42\ESC[0m" == "file:42"
+    , test "stripAnsi no-op on clean text" $
+        stripAnsi "src/Main.hs:42:10:code" == "src/Main.hs:42:10:code"
+    , test "stripAnsi idempotent" $
+        let s = "\ESC[31mred\ESC[0m"
+         in stripAnsi (stripAnsi s) == stripAnsi s
+    ]
 
-    -- parseLine
-    , test "parseLine rg line" $
+-- ═══════════════════════════════════════════════════════════════════════
+-- parseLine
+-- ═══════════════════════════════════════════════════════════════════════
+
+parseLineTests :: [TestResult]
+parseLineTests =
+    [ test "parseLine rg line" $
         parseLine "src/Main.hs:42:10:code here" == RgLine "src/Main.hs" 42
     , test "parseLine rg with ANSI" $
         parseLine "\ESC[35msrc/Main.hs\ESC[0m:42:10:code" == RgLine "src/Main.hs" 42
@@ -154,26 +129,255 @@ main = runTests
         parseLine "?\tfile.txt" == FdLine Untracked "file.txt"
     , test "parseLine plain filename" $
         parseLine "CLAUDE.md" == FdLine Clean "CLAUDE.md"
+    , test "parseLine fd with path" $
+        parseLine " \tsrc/Foo/Bar.hs" == FdLine Clean "src/Foo/Bar.hs"
+    , test "parseLine fd unknown status label" $
+        parseLine "X\tfile.txt" == FdLine Clean "file.txt"
+    ]
 
-    -- parseQuery
-    , test "parseQuery plain text" $
-        case parseQuery "hello" of FileMode -> True; _ -> False
+-- ═══════════════════════════════════════════════════════════════════════
+-- parseQuery
+-- ═══════════════════════════════════════════════════════════════════════
+
+parseQueryTests :: [TestResult]
+parseQueryTests =
+    [ test "parseQuery plain text" $
+        parseQuery "hello" == FileMode
+    , test "parseQuery empty" $
+        parseQuery "" == FileMode
     , test "parseQuery escaped hash" $
-        case parseQuery "\\#hello" of FileMode -> True; _ -> False
+        parseQuery "\\#hello" == FileMode
     , test "parseQuery rg live" $
-        case parseQuery "#pattern" of RgLive "pattern" [] -> True; _ -> False
+        parseQuery "#pattern" == RgLive "pattern" []
+    , test "parseQuery rg live empty pattern" $
+        parseQuery "#" == RgLive "" []
     , test "parseQuery rg locked" $
-        case parseQuery "#pattern#filter" of RgLocked "pattern" "filter" [] -> True; _ -> False
+        parseQuery "#pattern#filter" == RgLocked "pattern" "filter" []
     , test "parseQuery rg locked empty filter" $
-        case parseQuery "#pattern#" of RgLocked "pattern" "" [] -> True; _ -> False
+        parseQuery "#pattern#" == RgLocked "pattern" "" []
     , test "parseQuery rg with extra args" $
-        case parseQuery "#pat -- -g *.hs" of RgLive "pat" ["-g", "*.hs"] -> True; _ -> False
+        parseQuery "#pat -- -g *.hs" == RgLive "pat" ["-g", "*.hs"]
+    , test "parseQuery rg locked with extra args" $
+        parseQuery "#pat -- -g *.hs#filt" == RgLocked "pat" "filt" ["-g", "*.hs"]
     , test "parseQuery fzfRg" $
-        case parseQuery "nix#import" of FzfRg "nix" "import" [] -> True; _ -> False
+        parseQuery "nix#import" == FzfRg "nix" "import" []
     , test "parseQuery fzfRg with extra args" $
-        case parseQuery "nix#pat -- -g *.hs" of FzfRg "nix" "pat" ["-g", "*.hs"] -> True; _ -> False
+        parseQuery "nix#pat -- -g *.hs" == FzfRg "nix" "pat" ["-g", "*.hs"]
     , test "parseQuery fzfRg trailing # pending" $
-        case parseQuery "nix#" of FzfRgPending "nix" -> True; _ -> False
+        parseQuery "nix#" == FzfRgPending "nix"
     , test "parseQuery fzfRg trailing # space pending" $
-        case parseQuery "nix# " of FzfRgPending "nix" -> True; _ -> False
+        parseQuery "nix# " == FzfRgPending "nix"
+    , test "parseQuery fzfRg with spaces in filter" $
+        parseQuery "foo bar#pat" == FzfRg "foo bar" "pat" []
+    ]
+
+-- ═══════════════════════════════════════════════════════════════════════
+-- parseSFilter
+-- ═══════════════════════════════════════════════════════════════════════
+
+parseSFilterTests :: [TestResult]
+parseSFilterTests =
+    [ test "parseSFilter no prefix" $
+        parseSFilter "hello" == (Nothing, "hello")
+    , test "parseSFilter empty" $
+        parseSFilter "" == (Nothing, "")
+    , test "parseSFilter unstaged" $
+        parseSFilter "^U some query" == (Just Unstaged, "some query")
+    , test "parseSFilter staged" $
+        parseSFilter "^S file.hs" == (Just Staged, "file.hs")
+    , test "parseSFilter untracked" $
+        parseSFilter "^? new" == (Just Untracked, "new")
+    , test "parseSFilter no space after prefix" $
+        parseSFilter "^Unospaced" == (Nothing, "^Unospaced")
+    , test "parseSFilter just prefix" $
+        parseSFilter "^U " == (Just Unstaged, "")
+    ]
+
+-- ═══════════════════════════════════════════════════════════════════════
+-- lineFile / lineRef
+-- ═══════════════════════════════════════════════════════════════════════
+
+lineAccessorTests :: [TestResult]
+lineAccessorTests =
+    [ test "lineFile RgLine" $
+        lineFile (RgLine "src/Main.hs" 42) == "src/Main.hs"
+    , test "lineFile FdLine" $
+        lineFile (FdLine Clean "README.md") == "README.md"
+    , test "lineRef RgLine" $
+        lineRef (RgLine "src/Main.hs" 42) == "src/Main.hs:42"
+    , test "lineRef FdLine" $
+        lineRef (FdLine Unstaged "file.txt") == "file.txt"
+    ]
+
+-- ═══════════════════════════════════════════════════════════════════════
+-- makeRelPath
+-- ═══════════════════════════════════════════════════════════════════════
+
+makeRelPathTests :: [TestResult]
+makeRelPathTests =
+    [ test "makeRelPath same dir" $
+        makeRelPath "/home/user/proj" "/home/user/proj" "src/Main.hs"
+            == "src/Main.hs"
+    , test "makeRelPath absolute path passthrough" $
+        makeRelPath "/home/user/proj" "/home/user/proj/sub" "/tmp/file"
+            == "/tmp/file"
+    , test "makeRelPath one level up" $
+        makeRelPath "/home/user/proj" "/home/user/proj/sub" "file.hs"
+            == "sub/file.hs"
+    , test "makeRelPath two levels up" $
+        makeRelPath "/home/user/proj" "/home/user/proj/a/b" "file.hs"
+            == "a/b/file.hs"
+    , test "makeRelPath sibling dir (1 up)" $
+        makeRelPath "/home/user/proj/a" "/home/user/proj/b" "file.hs"
+            == "../b/file.hs"
+    , test "makeRelPath too many levels up (>2) falls back to absolute" $
+        let result = makeRelPath "/a/b/c/d" "/a/x" "f"
+         in T.isPrefixOf "/" result  -- should be absolute
+    , test "makeRelPath trailing sep normalization" $
+        makeRelPath "/home/user/proj/" "/home/user/proj/" "file.hs"
+            == "file.hs"
+    ]
+
+-- ═══════════════════════════════════════════════════════════════════════
+-- interleave
+-- ═══════════════════════════════════════════════════════════════════════
+
+interleaveTests :: [TestResult]
+interleaveTests =
+    [ test "interleave empty extras" $
+        interleave ["a", "c", "e"] [] == ["a", "c", "e"]
+    , test "interleave empty main" $
+        interleave [] ["b", "d"] == ["b", "d"]
+    , test "interleave both empty" $
+        interleave [] ([] :: [Text]) == []
+    , test "interleave merges sorted" $
+        interleave ["a", "c", "e"] ["b", "d"] == ["a", "b", "c", "d", "e"]
+    , test "interleave extras before first" $
+        interleave ["c", "d"] ["a", "b"] == ["a", "b", "c", "d"]
+    , test "interleave extras after last" $
+        interleave ["a", "b"] ["c", "d"] == ["a", "b", "c", "d"]
+    , test "interleave preserves all elements" $
+        let m = ["b", "d", "f"]; e = ["a", "c", "e"]
+         in length (interleave m e) == length m + length e
+    , test "interleave duplicates" $
+        interleave ["a", "c"] ["a", "b"] == ["a", "a", "b", "c"]
+    ]
+
+-- ═══════════════════════════════════════════════════════════════════════
+-- ordNub
+-- ═══════════════════════════════════════════════════════════════════════
+
+ordNubTests :: [TestResult]
+ordNubTests =
+    [ test "ordNub empty" $
+        ordNub [] == []
+    , test "ordNub no dupes" $
+        ordNub ["a", "b", "c"] == ["a", "b", "c"]
+    , test "ordNub removes dupes" $
+        ordNub ["a", "b", "a", "c", "b"] == ["a", "b", "c"]
+    , test "ordNub preserves first occurrence order" $
+        ordNub ["c", "a", "b", "a", "c"] == ["c", "a", "b"]
+    , test "ordNub all same" $
+        ordNub ["x", "x", "x"] == ["x"]
+    ]
+
+-- ═══════════════════════════════════════════════════════════════════════
+-- gitStatusChar
+-- ═══════════════════════════════════════════════════════════════════════
+
+gitStatusCharTests :: [TestResult]
+gitStatusCharTests =
+    [ test "gitStatusChar Unstaged" $
+        gitStatusChar Unstaged == "U"
+    , test "gitStatusChar Staged" $
+        gitStatusChar Staged == "S"
+    , test "gitStatusChar Untracked" $
+        gitStatusChar Untracked == "?"
+    , test "gitStatusChar Clean" $
+        gitStatusChar Clean == " "
+    ]
+
+-- ═══════════════════════════════════════════════════════════════════════
+-- Subcmd roundtrip (flg → parseSubcmd)
+-- ═══════════════════════════════════════════════════════════════════════
+
+subcmdRoundtripTests :: [TestResult]
+subcmdRoundtripTests =
+    [ test ("subcmd roundtrip " <> show sub) $
+        parseSubcmd (T.unpack (flg sub)) == Just sub
+    | sub <- [minBound .. maxBound]
+    ]
+    <>
+    [ test "parseSubcmd unknown flag" $
+        parseSubcmd "--nonexistent" == Nothing
+    , test "parseSubcmd empty" $
+        parseSubcmd "" == Nothing
+    ]
+
+-- ═══════════════════════════════════════════════════════════════════════
+-- Config Read/Show roundtrip
+-- ═══════════════════════════════════════════════════════════════════════
+
+configRoundtripTests :: [TestResult]
+configRoundtripTests =
+    [ test "Config Read/Show roundtrip" $
+        let cfg = Config
+                { cDir = "/tmp/fzfx-test"
+                , cGit = "/home/user/proj"
+                , cOrig = "/home/user/proj"
+                , cCwd = "/home/user/proj/sub"
+                , cPane = "%42"
+                , cSelf = "/nix/store/xxx/bin/fzfx"
+                , cQuery = "#pattern"
+                , cOut = OTmux
+                , cAt = True
+                , cFd = FdFiles
+                , cHid = False
+                , cIgn = True
+                , cPrev = Diff
+                , cFileQuery = "some query"
+                , cDirQuery = ""
+                , cQueryStack = ["#foo", "bar#baz"]
+                , cPendingQuery = ""
+                , cWasRg = True
+                , cSavedFileSel = ["/home/user/proj/a.hs"]
+                , cSavedDirSel = []
+                }
+         in read (show cfg) == cfg
+    , test "Config Read/Show roundtrip default-like" $
+        let cfg = Config
+                { cDir = "/tmp/d"
+                , cGit = ""
+                , cOrig = "/home/user"
+                , cCwd = "/home/user"
+                , cPane = ""
+                , cSelf = "/usr/bin/fzfx"
+                , cQuery = ""
+                , cOut = OStdout
+                , cAt = False
+                , cFd = FdDirs
+                , cHid = True
+                , cIgn = False
+                , cPrev = Content
+                , cFileQuery = ""
+                , cDirQuery = ""
+                , cQueryStack = []
+                , cPendingQuery = ""
+                , cWasRg = False
+                , cSavedFileSel = []
+                , cSavedDirSel = []
+                }
+         in read (show cfg) == cfg
+    ]
+
+-- ═══════════════════════════════════════════════════════════════════════
+-- showT
+-- ═══════════════════════════════════════════════════════════════════════
+
+showTTests :: [TestResult]
+showTTests =
+    [ test "showT Int" $
+        showT (42 :: Int) == "42"
+    , test "showT Bool" $
+        showT True == "True"
     ]
