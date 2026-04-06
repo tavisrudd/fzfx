@@ -2,58 +2,58 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 
-module Fzfx.Core
-    ( -- * Domain Types
-      SearchMode (..)
-    , GitStatus (..)
-    , FdType (..)
-    , PrevMode (..)
-    , OutMode (..)
-    , LineInfo (..)
-    , Subcmd (..)
-    , Config (..)
+module Fzfx.Core (
+    -- * Domain Types
+    SearchMode (..),
+    GitStatus (..),
+    FdType (..),
+    PrevMode (..),
+    OutMode (..),
+    LineInfo (..),
+    Subcmd (..),
+    Config (..),
 
-      -- * State Machine
-    , Event (..)
-    , ToggleName (..)
-    , FzfAction (..)
-    , transition
-    , renderActions
+    -- * State Machine
+    Event (..),
+    ToggleName (..),
+    FzfAction (..),
+    transition,
+    renderActions,
 
-      -- * Subcmd Registry
-    , flg
-    , parseSubcmd
+    -- * Subcmd Registry
+    flg,
+    parseSubcmd,
 
-      -- * Config
-    , cfgPath
+    -- * Config
+    cfgPath,
 
-      -- * Query & Line Parsing
-    , parseQuery
-    , parseSFilter
-    , parseLine
-    , tryRg
-    , stripAnsi
+    -- * Query & Line Parsing
+    parseQuery,
+    parseSFilter,
+    parseLine,
+    tryRg,
+    stripAnsi,
 
-      -- * LineInfo Accessors
-    , lineFile
-    , lineRef
+    -- * LineInfo Accessors
+    lineFile,
+    lineRef,
 
-      -- * Path Utilities
-    , makeRelPath
+    -- * Path Utilities
+    makeRelPath,
 
-      -- * List Utilities
-    , interleave
-    , ordNub
+    -- * List Utilities
+    interleave,
+    ordNub,
 
-      -- * Display
-    , hdrText
-    , gitStatusChar
-    , showT
+    -- * Display
+    hdrText,
+    gitStatusChar,
+    showT,
 
-      -- * Conversion
-    , decodeOut
-    , t
-    ) where
+    -- * Conversion
+    decodeOut,
+    t,
+) where
 
 import Data.ByteString.Lazy qualified as LBS
 import Data.Char (isDigit)
@@ -218,14 +218,16 @@ parseQuery q
                  in RgLive pat ex
     | Just (filt, rgPat) <- parseFzfRg q =
         if T.null (T.stripStart rgPat)
-        then FzfRgPending filt
-        else let (pat, ex) = splitEx rgPat
-              in FzfRg filt pat ex
+            then FzfRgPending filt
+            else
+                let (pat, ex) = splitEx rgPat
+                 in FzfRg filt pat ex
     | otherwise = FileMode
   where
     parseFzfRg s = case T.breakOn "#" s of
         (before, rest)
-            | not (T.null before), not (T.null rest) ->
+            | not (T.null before)
+            , not (T.null rest) ->
                 Just (T.strip before, T.drop 1 rest)
             | otherwise -> Nothing
     splitEx s = case T.breakOn " -- " s of
@@ -256,14 +258,20 @@ parseLine raw = case tryRg (stripAnsi raw) of
 -- | Parse rg output: file:line:col:text
 tryRg :: Text -> Maybe (Text, Int)
 tryRg s = case T.break (== ':') s of
-    (file, rest1) | not (T.null file), Just r1 <- T.stripPrefix ":" rest1 ->
-        case T.break (== ':') r1 of
-            (lnS, rest2) | isAllDigit lnS, Just r2 <- T.stripPrefix ":" rest2 ->
-                case T.break (== ':') r2 of
-                    (colS, rest3) | isAllDigit colS, not (T.null rest3) ->
-                        Just (file, read (T.unpack lnS))
-                    _ -> Nothing
-            _ -> Nothing
+    (file, rest1)
+        | not (T.null file)
+        , Just r1 <- T.stripPrefix ":" rest1 ->
+            case T.break (== ':') r1 of
+                (lnS, rest2)
+                    | isAllDigit lnS
+                    , Just r2 <- T.stripPrefix ":" rest2 ->
+                        case T.break (== ':') r2 of
+                            (colS, rest3)
+                                | isAllDigit colS
+                                , not (T.null rest3) ->
+                                    Just (file, read (T.unpack lnS))
+                            _ -> Nothing
+                _ -> Nothing
     _ -> Nothing
   where
     isAllDigit s' = not (T.null s') && T.all isDigit s'
@@ -289,8 +297,9 @@ lineRef (FdLine _ p) = p
 -- Path Utilities
 -- ═══════════════════════════════════════════════════════════════════════
 
--- | Make a path relative from orig to cwd, using ../ up to 2 levels.
--- Falls back to absolute path beyond that.
+{- | Make a path relative from orig to cwd, using ../ up to 2 levels.
+Falls back to absolute path beyond that.
+-}
 makeRelPath :: Text -> Text -> Text -> Text
 makeRelPath orig cwd path
     | isAbsolute (t path) = path
@@ -302,9 +311,9 @@ makeRelPath orig cwd path
             common = length $ takeWhile id $ zipWith (==) origParts absParts
             ups = length origParts - common
             rest = drop common absParts
-        in if ups > 2
-           then T.pack absPath
-           else T.pack $ joinPath (replicate ups ".." <> rest)
+         in if ups > 2
+                then T.pack absPath
+                else T.pack $ joinPath (replicate ups ".." <> rest)
   where
     dropTrailingSep = reverse . dropWhile (== pathSeparator) . reverse
     normOrig = dropTrailingSep $ FP.normalise (t orig)
@@ -316,8 +325,9 @@ makeRelPath orig cwd path
 -- List Utilities
 -- ═══════════════════════════════════════════════════════════════════════
 
--- | Interleave sorted extras into main list, inserting each extra
--- just before the first main item that sorts after it.
+{- | Interleave sorted extras into main list, inserting each extra
+just before the first main item that sorts after it.
+-}
 interleave :: [Text] -> [Text] -> [Text]
 interleave main' [] = main'
 interleave [] extras = extras
@@ -339,10 +349,10 @@ ordNub = go Set.empty
 
 hdrText :: Config -> Text
 hdrText Config{..} =
-    let on  s = "\ESC[1;32m" <> s <> "\ESC[0m"
+    let on s = "\ESC[1;32m" <> s <> "\ESC[0m"
         off s = "\ESC[2m" <> s <> "\ESC[0m"
         dim s = "\ESC[2m" <> s <> "\ESC[0m"
-        tog True  = on
+        tog True = on
         tog False = off
         sep = " \x2502 "
         tilde p = maybe p ("~/" <>) $ T.stripPrefix "/home/" p >>= (T.stripPrefix "/" . T.dropWhile (/= '/'))
@@ -350,16 +360,20 @@ hdrText Config{..} =
             | cFd == FdDirs = "\n" <> dim ("cwd: " <> tilde cCwd)
             | cCwd == cOrig = ""
             | otherwise = "\n" <> dim ("cwd: " <> tilde cCwd <> "  (from " <> tilde cOrig <> ")")
-    in  T.intercalate sep
-        [ "C-/ " <> (if cFd == FdFiles then on "files" else off "files")
-            <> "/" <> (if cFd == FdDirs then on "dirs" else off "dirs")
-        , "M-h " <> tog cHid "hid"
-        , "M-i " <> tog cIgn "ign"
-        , "M-p prev"
-        , "M-u/s/?"
-        , "M-g " <> (if cPrev == Diff then on "diff" else off "diff")
-        , "M-a " <> tog cAt "@"
-        ] <> navLine
+     in T.intercalate
+            sep
+            [ "C-/ "
+                <> (if cFd == FdFiles then on "files" else off "files")
+                <> "/"
+                <> (if cFd == FdDirs then on "dirs" else off "dirs")
+            , "M-h " <> tog cHid "hid"
+            , "M-i " <> tog cIgn "ign"
+            , "M-p prev"
+            , "M-u/s/?"
+            , "M-g " <> (if cPrev == Diff then on "diff" else off "diff")
+            , "M-a " <> tog cAt "@"
+            ]
+            <> navLine
 
 -- ═══════════════════════════════════════════════════════════════════════
 -- State Machine
@@ -367,13 +381,13 @@ hdrText Config{..} =
 
 -- | Events that trigger state transitions
 data Event
-    = EvToggle ToggleName Text  -- toggle name, current query
-    | EvTransform Text          -- query changed (the query text)
-    | EvSwap Text               -- swap query format
-    | EvExtraArgs Text          -- insert " -- " for extra rg args
-    | EvSmartEnter Bool         -- is alt-enter?
-    | EvQueryPush Text          -- save query to stack
-    | EvQueryDelete Text        -- remove query from stack
+    = EvToggle ToggleName Text -- toggle name, current query
+    | EvTransform Text -- query changed (the query text)
+    | EvSwap Text -- swap query format
+    | EvExtraArgs Text -- insert " -- " for extra rg args
+    | EvSmartEnter Bool -- is alt-enter?
+    | EvQueryPush Text -- save query to stack
+    | EvQueryDelete Text -- remove query from stack
     deriving (Eq, Show)
 
 data ToggleName
@@ -381,79 +395,77 @@ data ToggleName
     | TgDiff
     | TgHidden
     | TgNoIgnore
-    | TgType       -- auto-toggles between files/dirs
-    | TgTypeD      -- switch to dirs
-    | TgTypeF      -- switch to files
+    | TgType -- auto-toggles between files/dirs
+    | TgTypeD -- switch to dirs
+    | TgTypeF -- switch to files
     deriving (Eq, Show)
 
 -- | FZF actions to emit (composed with +)
 data FzfAction
     = ChangePrompt Text
     | ChangeQuery Text
-    | ChangeHeader Text         -- pre-rendered header text
-    | ReloadSync Text           -- command to run
+    | ChangeHeader Text -- pre-rendered header text
+    | ReloadSync Text -- command to run
     | EnableSearch
     | DisableSearch
     | RefreshPreview
     | JumpFirst
     | Accept
-    | Become Text               -- become: command
-    | Execute Text              -- execute(): command
+    | Become Text -- become: command
+    | Execute Text -- execute(): command
     deriving (Eq, Show)
 
 -- | Pure state transition: config + event → (new config, fzf actions)
 transition :: Config -> Event -> (Config, [FzfAction])
-
 -- Toggle: @ prefix
 transition cfg (EvToggle TgAtPrefix _) =
-    let cfg' = cfg { cAt = not (cAt cfg) }
-    in (cfg', [ChangeHeader (hdrText cfg')])
-
+    let cfg' = cfg{cAt = not (cAt cfg)}
+     in (cfg', [ChangeHeader (hdrText cfg')])
 -- Toggle: diff/content preview
 transition cfg (EvToggle TgDiff _) =
-    let cfg' = cfg { cPrev = if cPrev cfg == Content then Diff else Content }
-    in (cfg', [RefreshPreview, ChangeHeader (hdrText cfg')])
-
+    let cfg' = cfg{cPrev = if cPrev cfg == Content then Diff else Content}
+     in (cfg', [RefreshPreview, ChangeHeader (hdrText cfg')])
 -- Toggle: hidden files
 transition cfg (EvToggle TgHidden _) =
-    let cfg' = cfg { cHid = not (cHid cfg) }
-    in (cfg', [reloadAction cfg', ChangeHeader (hdrText cfg')])
-
+    let cfg' = cfg{cHid = not (cHid cfg)}
+     in (cfg', [reloadAction cfg', ChangeHeader (hdrText cfg')])
 -- Toggle: no-ignore
 transition cfg (EvToggle TgNoIgnore _) =
-    let cfg' = cfg { cIgn = not (cIgn cfg) }
-    in (cfg', [reloadAction cfg', ChangeHeader (hdrText cfg')])
-
+    let cfg' = cfg{cIgn = not (cIgn cfg)}
+     in (cfg', [reloadAction cfg', ChangeHeader (hdrText cfg')])
 -- Toggle: type auto (dispatch to D or F)
 transition cfg (EvToggle TgType q) =
     let target = if cFd cfg == FdFiles then TgTypeD else TgTypeF
-    in transition cfg (EvToggle target q)
-
+     in transition cfg (EvToggle target q)
 -- Toggle: switch to dirs mode
 transition cfg (EvToggle TgTypeD curQ)
-    | cFd cfg == FdDirs = (cfg, [])  -- already in dirs mode
+    | cFd cfg == FdDirs = (cfg, []) -- already in dirs mode
     | otherwise =
         let restoreQ = cDirQuery cfg
-            cfg' = cfg { cFd = FdDirs, cFileQuery = curQ }
+            cfg' = cfg{cFd = FdDirs, cFileQuery = curQ}
             resetPos = [JumpFirst | T.null restoreQ]
-        in (cfg', [ reloadWithQuery cfg' restoreQ
-                  , ChangePrompt "dirs> "
-                  , ChangeQuery restoreQ
-                  ] <> resetPos
-                    <> [ChangeHeader (hdrText cfg')])
-
+         in ( cfg'
+            , [ reloadWithQuery cfg' restoreQ
+              , ChangePrompt "dirs> "
+              , ChangeQuery restoreQ
+              ]
+                <> resetPos
+                <> [ChangeHeader (hdrText cfg')]
+            )
 -- Toggle: switch to files mode
 transition cfg (EvToggle TgTypeF curQ)
-    | cFd cfg == FdFiles = (cfg, [])  -- already in files mode
+    | cFd cfg == FdFiles = (cfg, []) -- already in files mode
     | otherwise =
         let restoreQ = cFileQuery cfg
-            cfg' = cfg { cFd = FdFiles, cDirQuery = curQ }
-        in (cfg', [ reloadWithQuery cfg' restoreQ
-                  , ChangePrompt "files> "
-                  , ChangeQuery restoreQ
-                  , ChangeHeader (hdrText cfg')
-                  ])
-
+            cfg' = cfg{cFd = FdFiles, cDirQuery = curQ}
+         in ( cfg'
+            ,
+                [ reloadWithQuery cfg' restoreQ
+                , ChangePrompt "files> "
+                , ChangeQuery restoreQ
+                , ChangeHeader (hdrText cfg')
+                ]
+            )
 -- Transform: query changed — update prompt, search mode, reload
 transition cfg (EvTransform q) =
     let mode = parseQuery q
@@ -462,9 +474,11 @@ transition cfg (EvTransform q) =
         -- Auto-switch from dirs to files when entering rg mode
         autoSwitchFd = isRg && cFd cfg == FdDirs
         nFd = if isRg then FdFiles else cFd cfg
-        cfg' = cfg { cWasRg = isRg
-                    , cFd = if autoSwitchFd then FdFiles else cFd cfg
-                    }
+        cfg' =
+            cfg
+                { cWasRg = isRg
+                , cFd = if autoSwitchFd then FdFiles else cFd cfg
+                }
         hdrUpd = [ChangeHeader (hdrText cfg') | autoSwitchFd]
         promptName = case nFd of FdDirs -> "dirs"; FdFiles -> "files"
         act = case mode of
@@ -475,37 +489,35 @@ transition cfg (EvTransform q) =
             RgLocked{} -> [ChangePrompt "filter> ", DisableSearch, reloadAction cfg']
             FzfRg{} -> [ChangePrompt "fzf#rg> ", DisableSearch, reloadAction cfg']
             FzfRgPending{} -> [ChangePrompt "fzf#> ", DisableSearch, reloadAction cfg']
-    in (cfg', act <> hdrUpd)
-
+     in (cfg', act <> hdrUpd)
 -- ExtraArgs: insert " -- " at the right position for rg extra args
 transition cfg (EvExtraArgs q) =
     let result = case parseQuery q of
-            RgLive _ _  -> Just (q <> " -- -")
+            RgLive _ _ -> Just (q <> " -- -")
             RgLocked pat _ _ ->
                 -- Insert before the second # : #pat → #pat -- -#filter
                 case T.stripPrefix "#" q of
                     Just body -> case T.breakOn "#" body of
-                        (before, rest) | not (T.null rest) ->
-                            Just ("#" <> before <> " -- -" <> rest)
+                        (before, rest)
+                            | not (T.null rest) ->
+                                Just ("#" <> before <> " -- -" <> rest)
                         _ -> Just (q <> " -- -")
                     Nothing -> Nothing
-            FzfRg _ _ _    -> Just (q <> " -- -")
-            FzfRgPending _ -> Nothing  -- no rg pattern yet
-            FileMode       -> Nothing  -- not in rg mode
-    in case result of
-        Just q' -> (cfg, [ChangeQuery q'])
-        Nothing -> (cfg, [])
-
+            FzfRg _ _ _ -> Just (q <> " -- -")
+            FzfRgPending _ -> Nothing -- no rg pattern yet
+            FileMode -> Nothing -- not in rg mode
+     in case result of
+            Just q' -> (cfg, [ChangeQuery q'])
+            Nothing -> (cfg, [])
 -- Swap: switch between #rg#filter and filter#rg query formats
 transition cfg (EvSwap q) =
     let swapped = case parseQuery q of
-            RgLive pat _     -> pat <> "#"
+            RgLive pat _ -> pat <> "#"
             RgLocked pat f _ -> f <> "#" <> pat
-            FzfRg f pat _    -> "#" <> pat <> "#" <> f
-            FzfRgPending f   -> "#" <> f
-            FileMode         -> q <> "#"
-    in (cfg, [ChangeQuery swapped])
-
+            FzfRg f pat _ -> "#" <> pat <> "#" <> f
+            FzfRgPending f -> "#" <> f
+            FileMode -> q <> "#"
+     in (cfg, [ChangeQuery swapped])
 -- Smart enter: dirs mode navigates, files mode accepts/edits
 transition cfg (EvSmartEnter isAlt)
     | cFd cfg == FdDirs =
@@ -514,19 +526,18 @@ transition cfg (EvSmartEnter isAlt)
         (cfg, [Execute (cSelf cfg <> " " <> flg SEdit <> " {}")])
     | otherwise =
         (cfg, [Accept])
-
 -- Query push: add to stack (dedup against top)
 transition cfg (EvQueryPush q) =
     let stack = cQueryStack cfg
-        stack' = if T.null q || (not (null stack) && head stack == q)
-                    then stack
-                    else q : stack
-    in (cfg { cQueryStack = stack' }, [])
-
+        stack' =
+            if T.null q || (not (null stack) && head stack == q)
+                then stack
+                else q : stack
+     in (cfg{cQueryStack = stack'}, [])
 -- Query delete: remove from stack
 transition cfg (EvQueryDelete q) =
     let stack' = filter (/= q) (cQueryStack cfg)
-    in (cfg { cQueryStack = stack' }, [])
+     in (cfg{cQueryStack = stack'}, [])
 
 -- | Helper: build a reload-sync action using cSelf
 reloadAction :: Config -> FzfAction
@@ -540,14 +551,14 @@ reloadWithQuery cfg q = ReloadSync (cSelf cfg <> " " <> flg SReload <> " " <> q)
 renderActions :: [FzfAction] -> Text
 renderActions = T.intercalate "+" . map render1
   where
-    render1 (ChangePrompt p)  = "change-prompt(" <> p <> ")"
-    render1 (ChangeQuery q)   = "change-query(" <> q <> ")"
-    render1 (ChangeHeader h)  = "change-header(" <> h <> ")"
-    render1 (ReloadSync cmd)  = "reload-sync(" <> cmd <> ")"
-    render1 EnableSearch      = "enable-search"
-    render1 DisableSearch     = "disable-search"
-    render1 RefreshPreview    = "refresh-preview"
-    render1 JumpFirst         = "first"
-    render1 Accept            = "accept"
-    render1 (Become cmd)      = "become:" <> cmd
-    render1 (Execute cmd)     = "execute(" <> cmd <> ")"
+    render1 (ChangePrompt p) = "change-prompt(" <> p <> ")"
+    render1 (ChangeQuery q) = "change-query(" <> q <> ")"
+    render1 (ChangeHeader h) = "change-header(" <> h <> ")"
+    render1 (ReloadSync cmd) = "reload-sync(" <> cmd <> ")"
+    render1 EnableSearch = "enable-search"
+    render1 DisableSearch = "disable-search"
+    render1 RefreshPreview = "refresh-preview"
+    render1 JumpFirst = "first"
+    render1 Accept = "accept"
+    render1 (Become cmd) = "become:" <> cmd
+    render1 (Execute cmd) = "execute(" <> cmd <> ")"

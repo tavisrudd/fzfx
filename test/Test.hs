@@ -32,28 +32,30 @@ runTests results = do
 -- ═══════════════════════════════════════════════════════════════════════
 
 main :: IO ()
-main = runTests $ concat
-    [ tryRgTests
-    , stripAnsiTests
-    , parseLineTests
-    , parseQueryTests
-    , parseSFilterTests
-    , lineAccessorTests
-    , makeRelPathTests
-    , interleaveTests
-    , ordNubTests
-    , gitStatusCharTests
-    , subcmdRoundtripTests
-    , configRoundtripTests
-    , showTTests
-    , transitionToggleTests
-    , transitionTransformTests
-    , transitionSwapTests
-    , transitionExtraArgsTests
-    , transitionSmartEnterTests
-    , transitionQueryTests
-    , renderActionsTests
-    ]
+main =
+    runTests $
+        concat
+            [ tryRgTests
+            , stripAnsiTests
+            , parseLineTests
+            , parseQueryTests
+            , parseSFilterTests
+            , lineAccessorTests
+            , makeRelPathTests
+            , interleaveTests
+            , ordNubTests
+            , gitStatusCharTests
+            , subcmdRoundtripTests
+            , configRoundtripTests
+            , showTTests
+            , transitionToggleTests
+            , transitionTransformTests
+            , transitionSwapTests
+            , transitionExtraArgsTests
+            , transitionSmartEnterTests
+            , transitionQueryTests
+            , renderActionsTests
+            ]
 
 -- ═══════════════════════════════════════════════════════════════════════
 -- tryRg
@@ -239,7 +241,7 @@ makeRelPathTests =
             == "../b/file.hs"
     , test "makeRelPath too many levels up (>2) falls back to absolute" $
         let result = makeRelPath "/a/b/c/d" "/a/x" "f"
-         in T.isPrefixOf "/" result  -- should be absolute
+         in T.isPrefixOf "/" result -- should be absolute
     , test "makeRelPath trailing sep normalization" $
         makeRelPath "/home/user/proj/" "/home/user/proj/" "file.hs"
             == "file.hs"
@@ -314,12 +316,11 @@ subcmdRoundtripTests =
         parseSubcmd (T.unpack (flg sub)) == Just sub
     | sub <- [minBound .. maxBound]
     ]
-    <>
-    [ test "parseSubcmd unknown flag" $
-        parseSubcmd "--nonexistent" == Nothing
-    , test "parseSubcmd empty" $
-        parseSubcmd "" == Nothing
-    ]
+        <> [ test "parseSubcmd unknown flag" $
+                parseSubcmd "--nonexistent" == Nothing
+           , test "parseSubcmd empty" $
+                parseSubcmd "" == Nothing
+           ]
 
 -- ═══════════════════════════════════════════════════════════════════════
 -- Config Read/Show roundtrip
@@ -328,52 +329,54 @@ subcmdRoundtripTests =
 configRoundtripTests :: [TestResult]
 configRoundtripTests =
     [ test "Config Read/Show roundtrip" $
-        let cfg = Config
-                { cDir = "/tmp/fzfx-test"
-                , cGit = "/home/user/proj"
-                , cOrig = "/home/user/proj"
-                , cCwd = "/home/user/proj/sub"
-                , cPane = "%42"
-                , cSelf = "/nix/store/xxx/bin/fzfx"
-                , cQuery = "#pattern"
-                , cOut = OTmux
-                , cAt = True
-                , cFd = FdFiles
-                , cHid = False
-                , cIgn = True
-                , cPrev = Diff
-                , cFileQuery = "some query"
-                , cDirQuery = ""
-                , cQueryStack = ["#foo", "bar#baz"]
-                , cPendingQuery = ""
-                , cWasRg = True
-                , cSavedFileSel = ["/home/user/proj/a.hs"]
-                , cSavedDirSel = []
-                }
+        let cfg =
+                Config
+                    { cDir = "/tmp/fzfx-test"
+                    , cGit = "/home/user/proj"
+                    , cOrig = "/home/user/proj"
+                    , cCwd = "/home/user/proj/sub"
+                    , cPane = "%42"
+                    , cSelf = "/nix/store/xxx/bin/fzfx"
+                    , cQuery = "#pattern"
+                    , cOut = OTmux
+                    , cAt = True
+                    , cFd = FdFiles
+                    , cHid = False
+                    , cIgn = True
+                    , cPrev = Diff
+                    , cFileQuery = "some query"
+                    , cDirQuery = ""
+                    , cQueryStack = ["#foo", "bar#baz"]
+                    , cPendingQuery = ""
+                    , cWasRg = True
+                    , cSavedFileSel = ["/home/user/proj/a.hs"]
+                    , cSavedDirSel = []
+                    }
          in read (show cfg) == cfg
     , test "Config Read/Show roundtrip default-like" $
-        let cfg = Config
-                { cDir = "/tmp/d"
-                , cGit = ""
-                , cOrig = "/home/user"
-                , cCwd = "/home/user"
-                , cPane = ""
-                , cSelf = "/usr/bin/fzfx"
-                , cQuery = ""
-                , cOut = OStdout
-                , cAt = False
-                , cFd = FdDirs
-                , cHid = True
-                , cIgn = False
-                , cPrev = Content
-                , cFileQuery = ""
-                , cDirQuery = ""
-                , cQueryStack = []
-                , cPendingQuery = ""
-                , cWasRg = False
-                , cSavedFileSel = []
-                , cSavedDirSel = []
-                }
+        let cfg =
+                Config
+                    { cDir = "/tmp/d"
+                    , cGit = ""
+                    , cOrig = "/home/user"
+                    , cCwd = "/home/user"
+                    , cPane = ""
+                    , cSelf = "/usr/bin/fzfx"
+                    , cQuery = ""
+                    , cOut = OStdout
+                    , cAt = False
+                    , cFd = FdDirs
+                    , cHid = True
+                    , cIgn = False
+                    , cPrev = Content
+                    , cFileQuery = ""
+                    , cDirQuery = ""
+                    , cQueryStack = []
+                    , cPendingQuery = ""
+                    , cWasRg = False
+                    , cSavedFileSel = []
+                    , cSavedDirSel = []
+                    }
          in read (show cfg) == cfg
     ]
 
@@ -394,28 +397,29 @@ showTTests =
 -- ═══════════════════════════════════════════════════════════════════════
 
 testCfg :: Config
-testCfg = Config
-    { cDir = "/tmp/fzfx-test"
-    , cGit = "/home/user/proj"
-    , cOrig = "/home/user/proj"
-    , cCwd = "/home/user/proj"
-    , cPane = "%42"
-    , cSelf = "/usr/bin/fzfx"
-    , cQuery = ""
-    , cOut = OTmux
-    , cAt = False
-    , cFd = FdFiles
-    , cHid = False
-    , cIgn = False
-    , cPrev = Content
-    , cFileQuery = ""
-    , cDirQuery = ""
-    , cQueryStack = []
-    , cPendingQuery = ""
-    , cWasRg = False
-    , cSavedFileSel = []
-    , cSavedDirSel = []
-    }
+testCfg =
+    Config
+        { cDir = "/tmp/fzfx-test"
+        , cGit = "/home/user/proj"
+        , cOrig = "/home/user/proj"
+        , cCwd = "/home/user/proj"
+        , cPane = "%42"
+        , cSelf = "/usr/bin/fzfx"
+        , cQuery = ""
+        , cOut = OTmux
+        , cAt = False
+        , cFd = FdFiles
+        , cHid = False
+        , cIgn = False
+        , cPrev = Content
+        , cFileQuery = ""
+        , cDirQuery = ""
+        , cQueryStack = []
+        , cPendingQuery = ""
+        , cWasRg = False
+        , cSavedFileSel = []
+        , cSavedDirSel = []
+        }
 
 hasAction :: FzfAction -> [FzfAction] -> Bool
 hasAction a = any (== a)
@@ -438,86 +442,79 @@ transitionToggleTests =
     -- @ prefix toggle
     [ test "toggle at_prefix: flips cAt" $
         let (cfg', _) = transition testCfg (EvToggle TgAtPrefix "")
-        in cAt cfg' == True
+         in cAt cfg' == True
     , test "toggle at_prefix: flips back" $
-        let cfg1 = testCfg { cAt = True }
+        let cfg1 = testCfg{cAt = True}
             (cfg', _) = transition cfg1 (EvToggle TgAtPrefix "")
-        in cAt cfg' == False
+         in cAt cfg' == False
     , test "toggle at_prefix: emits header, no reload" $
         let (_, acts) = transition testCfg (EvToggle TgAtPrefix "")
-        in hasHeader acts && not (hasReload acts)
-
-    -- diff toggle
-    , test "toggle diff: Content → Diff" $
+         in hasHeader acts && not (hasReload acts)
+    , -- diff toggle
+      test "toggle diff: Content → Diff" $
         let (cfg', _) = transition testCfg (EvToggle TgDiff "")
-        in cPrev cfg' == Diff
+         in cPrev cfg' == Diff
     , test "toggle diff: Diff → Content" $
-        let cfg1 = testCfg { cPrev = Diff }
+        let cfg1 = testCfg{cPrev = Diff}
             (cfg', _) = transition cfg1 (EvToggle TgDiff "")
-        in cPrev cfg' == Content
+         in cPrev cfg' == Content
     , test "toggle diff: emits refresh-preview" $
         let (_, acts) = transition testCfg (EvToggle TgDiff "")
-        in hasAction RefreshPreview acts
-
-    -- hidden toggle
-    , test "toggle hidden: flips cHid" $
+         in hasAction RefreshPreview acts
+    , -- hidden toggle
+      test "toggle hidden: flips cHid" $
         let (cfg', _) = transition testCfg (EvToggle TgHidden "")
-        in cHid cfg' == True
+         in cHid cfg' == True
     , test "toggle hidden: emits reload + header" $
         let (_, acts) = transition testCfg (EvToggle TgHidden "")
-        in hasReload acts && hasHeader acts
-
-    -- no-ignore toggle
-    , test "toggle no_ignore: flips cIgn" $
+         in hasReload acts && hasHeader acts
+    , -- no-ignore toggle
+      test "toggle no_ignore: flips cIgn" $
         let (cfg', _) = transition testCfg (EvToggle TgNoIgnore "")
-        in cIgn cfg' == True
+         in cIgn cfg' == True
     , test "toggle no_ignore: emits reload + header" $
         let (_, acts) = transition testCfg (EvToggle TgNoIgnore "")
-        in hasReload acts && hasHeader acts
-
-    -- type toggle: files → dirs
-    , test "toggle type: files → dirs" $
+         in hasReload acts && hasHeader acts
+    , -- type toggle: files → dirs
+      test "toggle type: files → dirs" $
         let (cfg', _) = transition testCfg (EvToggle TgType "curquery")
-        in cFd cfg' == FdDirs
+         in cFd cfg' == FdDirs
     , test "toggle type: files → dirs saves file query" $
         let (cfg', _) = transition testCfg (EvToggle TgType "curquery")
-        in cFileQuery cfg' == "curquery"
+         in cFileQuery cfg' == "curquery"
     , test "toggle type: files → dirs emits dirs prompt" $
         let (_, acts) = transition testCfg (EvToggle TgType "curquery")
-        in hasAction (ChangePrompt "dirs> ") acts
+         in hasAction (ChangePrompt "dirs> ") acts
     , test "toggle type: files → dirs restores dir query" $
-        let cfg1 = testCfg { cDirQuery = "saved_dir_q" }
+        let cfg1 = testCfg{cDirQuery = "saved_dir_q"}
             (_, acts) = transition cfg1 (EvToggle TgType "curquery")
-        in hasAction (ChangeQuery "saved_dir_q") acts
-
-    -- type toggle: dirs → files
-    , test "toggle type: dirs → files" $
-        let cfg1 = testCfg { cFd = FdDirs }
+         in hasAction (ChangeQuery "saved_dir_q") acts
+    , -- type toggle: dirs → files
+      test "toggle type: dirs → files" $
+        let cfg1 = testCfg{cFd = FdDirs}
             (cfg', _) = transition cfg1 (EvToggle TgType "dirquery")
-        in cFd cfg' == FdFiles
+         in cFd cfg' == FdFiles
     , test "toggle type: dirs → files saves dir query" $
-        let cfg1 = testCfg { cFd = FdDirs }
+        let cfg1 = testCfg{cFd = FdDirs}
             (cfg', _) = transition cfg1 (EvToggle TgType "dirquery")
-        in cDirQuery cfg' == "dirquery"
+         in cDirQuery cfg' == "dirquery"
     , test "toggle type: dirs → files emits files prompt" $
-        let cfg1 = testCfg { cFd = FdDirs }
+        let cfg1 = testCfg{cFd = FdDirs}
             (_, acts) = transition cfg1 (EvToggle TgType "dirquery")
-        in hasAction (ChangePrompt "files> ") acts
-
-    -- type toggle: empty restore query → jump first
-    , test "toggle type: empty restore query → first" $
+         in hasAction (ChangePrompt "files> ") acts
+    , -- type toggle: empty restore query → jump first
+      test "toggle type: empty restore query → first" $
         let (_, acts) = transition testCfg (EvToggle TgType "q")
-        in hasAction JumpFirst acts
+         in hasAction JumpFirst acts
     , test "toggle type: non-empty restore query → no first" $
-        let cfg1 = testCfg { cDirQuery = "saved" }
+        let cfg1 = testCfg{cDirQuery = "saved"}
             (_, acts) = transition cfg1 (EvToggle TgType "q")
-        in noAction JumpFirst acts
-
-    -- type_d when already dirs → no-op
-    , test "toggle type_d when already dirs: no-op" $
-        let cfg1 = testCfg { cFd = FdDirs }
+         in noAction JumpFirst acts
+    , -- type_d when already dirs → no-op
+      test "toggle type_d when already dirs: no-op" $
+        let cfg1 = testCfg{cFd = FdDirs}
             (cfg', acts) = transition cfg1 (EvToggle TgTypeD "q")
-        in null acts && cFd cfg' == FdDirs
+         in null acts && cFd cfg' == FdDirs
     ]
 
 -- ═══════════════════════════════════════════════════════════════════════
@@ -528,57 +525,46 @@ transitionTransformTests :: [TestResult]
 transitionTransformTests =
     [ test "transform: plain query → FileMode, files prompt" $
         let (_, acts) = transition testCfg (EvTransform "hello")
-        in hasAction (ChangePrompt "files> ") acts && hasAction EnableSearch acts
-
+         in hasAction (ChangePrompt "files> ") acts && hasAction EnableSearch acts
     , test "transform: plain query, not wasRg → no reload" $
         let (_, acts) = transition testCfg (EvTransform "hello")
-        in not (hasReload acts)
-
+         in not (hasReload acts)
     , test "transform: plain query, wasRg → reload" $
-        let cfg1 = testCfg { cWasRg = True }
+        let cfg1 = testCfg{cWasRg = True}
             (_, acts) = transition cfg1 (EvTransform "hello")
-        in hasReload acts
-
+         in hasReload acts
     , test "transform: #pattern → rg prompt, disable search, reload" $
         let (_, acts) = transition testCfg (EvTransform "#pattern")
-        in hasAction (ChangePrompt "rg> ") acts
-           && hasAction DisableSearch acts
-           && hasReload acts
-
+         in hasAction (ChangePrompt "rg> ") acts
+                && hasAction DisableSearch acts
+                && hasReload acts
     , test "transform: #pat#filt → filter prompt" $
         let (_, acts) = transition testCfg (EvTransform "#pat#filt")
-        in hasAction (ChangePrompt "filter> ") acts
-
+         in hasAction (ChangePrompt "filter> ") acts
     , test "transform: foo#bar → fzf#rg prompt" $
         let (_, acts) = transition testCfg (EvTransform "foo#bar")
-        in hasAction (ChangePrompt "fzf#rg> ") acts
-
+         in hasAction (ChangePrompt "fzf#rg> ") acts
     , test "transform: foo# → fzf# prompt" $
         let (_, acts) = transition testCfg (EvTransform "foo#")
-        in hasAction (ChangePrompt "fzf#> ") acts
-
+         in hasAction (ChangePrompt "fzf#> ") acts
     , test "transform: sets cWasRg for rg mode" $
         let (cfg', _) = transition testCfg (EvTransform "#pattern")
-        in cWasRg cfg' == True
-
+         in cWasRg cfg' == True
     , test "transform: clears cWasRg for file mode" $
-        let cfg1 = testCfg { cWasRg = True }
+        let cfg1 = testCfg{cWasRg = True}
             (cfg', _) = transition cfg1 (EvTransform "hello")
-        in cWasRg cfg' == False
-
+         in cWasRg cfg' == False
     , test "transform: auto-switches dirs→files on rg entry" $
-        let cfg1 = testCfg { cFd = FdDirs }
+        let cfg1 = testCfg{cFd = FdDirs}
             (cfg', acts) = transition cfg1 (EvTransform "#pattern")
-        in cFd cfg' == FdFiles && hasHeader acts
-
+         in cFd cfg' == FdFiles && hasHeader acts
     , test "transform: stays files on rg entry" $
         let (cfg', acts) = transition testCfg (EvTransform "#pattern")
-        in cFd cfg' == FdFiles && not (hasHeader acts)
-
+         in cFd cfg' == FdFiles && not (hasHeader acts)
     , test "transform: dirs prompt in dirs mode" $
-        let cfg1 = testCfg { cFd = FdDirs }
+        let cfg1 = testCfg{cFd = FdDirs}
             (_, acts) = transition cfg1 (EvTransform "hello")
-        in hasAction (ChangePrompt "dirs> ") acts
+         in hasAction (ChangePrompt "dirs> ") acts
     ]
 
 -- ═══════════════════════════════════════════════════════════════════════
@@ -589,27 +575,22 @@ transitionSwapTests :: [TestResult]
 transitionSwapTests =
     [ test "swap: FileMode → append #" $
         let (_, acts) = transition testCfg (EvSwap "hello")
-        in hasAction (ChangeQuery "hello#") acts
-
+         in hasAction (ChangeQuery "hello#") acts
     , test "swap: RgLive → pat#" $
         let (_, acts) = transition testCfg (EvSwap "#pattern")
-        in hasAction (ChangeQuery "pattern#") acts
-
+         in hasAction (ChangeQuery "pattern#") acts
     , test "swap: RgLocked → filt#pat" $
         let (_, acts) = transition testCfg (EvSwap "#pat#filt")
-        in hasAction (ChangeQuery "filt#pat") acts
-
+         in hasAction (ChangeQuery "filt#pat") acts
     , test "swap: FzfRg → #pat#filt" $
         let (_, acts) = transition testCfg (EvSwap "filt#pat")
-        in hasAction (ChangeQuery "#pat#filt") acts
-
+         in hasAction (ChangeQuery "#pat#filt") acts
     , test "swap: FzfRgPending → #filt" $
         let (_, acts) = transition testCfg (EvSwap "filt#")
-        in hasAction (ChangeQuery "#filt") acts
-
+         in hasAction (ChangeQuery "#filt") acts
     , test "swap: does not modify config" $
         let (cfg', _) = transition testCfg (EvSwap "hello")
-        in cfg' == testCfg
+         in cfg' == testCfg
     ]
 
 -- ═══════════════════════════════════════════════════════════════════════
@@ -620,35 +601,28 @@ transitionExtraArgsTests :: [TestResult]
 transitionExtraArgsTests =
     [ test "extraArgs: #pattern → #pattern -- -" $
         let (_, acts) = transition testCfg (EvExtraArgs "#pattern")
-        in acts == [ChangeQuery "#pattern -- -"]
-
+         in acts == [ChangeQuery "#pattern -- -"]
     , test "extraArgs: #pat#filt → #pat -- -#filt" $
         let (_, acts) = transition testCfg (EvExtraArgs "#pat#filt")
-        in acts == [ChangeQuery "#pat -- -#filt"]
-
+         in acts == [ChangeQuery "#pat -- -#filt"]
     , test "extraArgs: #pat#filt with spaces → preserves filter" $
         let (_, acts) = transition testCfg (EvExtraArgs "#search term#my filter")
-        in acts == [ChangeQuery "#search term -- -#my filter"]
-
+         in acts == [ChangeQuery "#search term -- -#my filter"]
     , test "extraArgs: foo#bar (fzfRg) → foo#bar -- -" $
         let (_, acts) = transition testCfg (EvExtraArgs "foo#bar")
-        in acts == [ChangeQuery "foo#bar -- -"]
-
+         in acts == [ChangeQuery "foo#bar -- -"]
     , test "extraArgs: foo# (pending) → no-op" $
         let (_, acts) = transition testCfg (EvExtraArgs "foo#")
-        in null acts
-
+         in null acts
     , test "extraArgs: plain query → no-op" $
         let (_, acts) = transition testCfg (EvExtraArgs "hello")
-        in null acts
-
+         in null acts
     , test "extraArgs: empty → no-op" $
         let (_, acts) = transition testCfg (EvExtraArgs "")
-        in null acts
-
+         in null acts
     , test "extraArgs: does not modify config" $
         let (cfg', _) = transition testCfg (EvExtraArgs "#pat")
-        in cfg' == testCfg
+         in cfg' == testCfg
     ]
 
 -- ═══════════════════════════════════════════════════════════════════════
@@ -659,21 +633,18 @@ transitionSmartEnterTests :: [TestResult]
 transitionSmartEnterTests =
     [ test "smartEnter: files mode, not alt → accept" $
         let (_, acts) = transition testCfg (EvSmartEnter False)
-        in acts == [Accept]
-
+         in acts == [Accept]
     , test "smartEnter: files mode, alt → execute edit" $
         let (_, acts) = transition testCfg (EvSmartEnter True)
-        in case acts of [Execute cmd] -> "edit" `T.isInfixOf` cmd; _ -> False
-
+         in case acts of [Execute cmd] -> "edit" `T.isInfixOf` cmd; _ -> False
     , test "smartEnter: dirs mode → become navigate" $
-        let cfg1 = testCfg { cFd = FdDirs }
+        let cfg1 = testCfg{cFd = FdDirs}
             (_, acts) = transition cfg1 (EvSmartEnter False)
-        in case acts of [Become cmd] -> "navigate" `T.isInfixOf` cmd; _ -> False
-
+         in case acts of [Become cmd] -> "navigate" `T.isInfixOf` cmd; _ -> False
     , test "smartEnter: dirs mode, alt also navigates" $
-        let cfg1 = testCfg { cFd = FdDirs }
+        let cfg1 = testCfg{cFd = FdDirs}
             (_, acts) = transition cfg1 (EvSmartEnter True)
-        in case acts of [Become cmd] -> "navigate" `T.isInfixOf` cmd; _ -> False
+         in case acts of [Become cmd] -> "navigate" `T.isInfixOf` cmd; _ -> False
     ]
 
 -- ═══════════════════════════════════════════════════════════════════════
@@ -684,35 +655,29 @@ transitionQueryTests :: [TestResult]
 transitionQueryTests =
     [ test "queryPush: adds to empty stack" $
         let (cfg', _) = transition testCfg (EvQueryPush "hello")
-        in cQueryStack cfg' == ["hello"]
-
+         in cQueryStack cfg' == ["hello"]
     , test "queryPush: prepends to stack" $
-        let cfg1 = testCfg { cQueryStack = ["old"] }
+        let cfg1 = testCfg{cQueryStack = ["old"]}
             (cfg', _) = transition cfg1 (EvQueryPush "new")
-        in cQueryStack cfg' == ["new", "old"]
-
+         in cQueryStack cfg' == ["new", "old"]
     , test "queryPush: dedup against top" $
-        let cfg1 = testCfg { cQueryStack = ["same", "other"] }
+        let cfg1 = testCfg{cQueryStack = ["same", "other"]}
             (cfg', _) = transition cfg1 (EvQueryPush "same")
-        in cQueryStack cfg' == ["same", "other"]
-
+         in cQueryStack cfg' == ["same", "other"]
     , test "queryPush: empty query is no-op" $
         let (cfg', _) = transition testCfg (EvQueryPush "")
-        in cQueryStack cfg' == []
-
+         in cQueryStack cfg' == []
     , test "queryPush: no actions emitted" $
         let (_, acts) = transition testCfg (EvQueryPush "q")
-        in null acts
-
+         in null acts
     , test "queryDelete: removes from stack" $
-        let cfg1 = testCfg { cQueryStack = ["a", "b", "c"] }
+        let cfg1 = testCfg{cQueryStack = ["a", "b", "c"]}
             (cfg', _) = transition cfg1 (EvQueryDelete "b")
-        in cQueryStack cfg' == ["a", "c"]
-
+         in cQueryStack cfg' == ["a", "c"]
     , test "queryDelete: non-existent is no-op" $
-        let cfg1 = testCfg { cQueryStack = ["a", "b"] }
+        let cfg1 = testCfg{cQueryStack = ["a", "b"]}
             (cfg', _) = transition cfg1 (EvQueryDelete "x")
-        in cQueryStack cfg' == ["a", "b"]
+         in cQueryStack cfg' == ["a", "b"]
     ]
 
 -- ═══════════════════════════════════════════════════════════════════════
@@ -723,25 +688,19 @@ renderActionsTests :: [TestResult]
 renderActionsTests =
     [ test "renderActions: single action" $
         renderActions [ChangePrompt "rg> "] == "change-prompt(rg> )"
-
     , test "renderActions: multiple actions joined with +" $
         renderActions [ChangePrompt "rg> ", DisableSearch]
             == "change-prompt(rg> )+disable-search"
-
     , test "renderActions: empty list" $
         renderActions [] == ""
-
     , test "renderActions: accept" $
         renderActions [Accept] == "accept"
-
     , test "renderActions: become" $
         renderActions [Become "fzfx --navigate into {} {q}"]
             == "become:fzfx --navigate into {} {q}"
-
     , test "renderActions: execute" $
         renderActions [Execute "fzfx --edit {}"]
             == "execute(fzfx --edit {})"
-
     , test "renderActions: reload-sync" $
         renderActions [ReloadSync "fzfx --reload {q}"]
             == "reload-sync(fzfx --reload {q})"
