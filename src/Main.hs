@@ -301,17 +301,20 @@ cmdPreview line = withCfg $ \Config{..} -> do
   where
     readInt s = case reads s of [(n, _)] -> n; _ -> 80 :: Int
 
+diffArgs :: GitStatus -> Text -> [Text]
+diffArgs st path = case st of
+    Unstaged -> ["diff", "--", path]
+    Staged -> ["diff", "--cached", "--", path]
+    Untracked -> ["diff", "--no-index", "--", "/dev/null", path]
+    Clean -> []
+
 diffPrev :: GitStatus -> Text -> Int -> IO ()
 diffPrev st path cols = do
-    let da = case st of
-            Unstaged -> ["diff", "--", path]
-            Staged -> ["diff", "--cached", "--", path]
-            Untracked -> ["diff", "--no-index", "--", "/dev/null", path]
-            Clean -> []
+    let da = diffArgs st path
     if null da
         then contentPrev path
         else
-            if cols >= 80
+            if cols >= 50
                 then piped ("git", da) ("delta", ["--width=" <> showT cols])
                 else exec "git" (da <> ["--color=always"])
 
@@ -326,7 +329,7 @@ contentPrev path = do
                 else exec "bat" [path, "--style=plain", "--color=always", "--line-range", "0:100"]
 
 cmdFullPreview :: Text -> IO ()
-cmdFullPreview line = withCfg $ \_ -> do
+cmdFullPreview line = withCfg $ \Config{..} -> do
     tmp <- getTemporaryDirectory
     let lkFile = tmp </> "fzfx-lesskey"
     writeFile lkFile "#command\n\\e\\e quit\n\\n quit\n\\r quit\n^G quit\n\\e/ quit\n^X^S quit\n"
@@ -334,12 +337,16 @@ cmdFullPreview line = withCfg $ \_ -> do
         RgLine file ln ->
             let pager = "less -Rc~ -j.5 +" <> show ln <> "g --lesskey-src=" <> lkFile
             in exec "bat" ["--color=always", "--style=numbers", "--highlight-line", showT ln, "--paging=always", "--pager", T.pack pager, "--", file]
-        FdLine _ path -> do
+        FdLine st path -> do
             let pager = "less -Rc~ --lesskey-src=" <> lkFile
-            isDir <- doesDirectoryExist (t path)
-            if isDir
-                then exec "eza" ["--icons", "--git-ignore", "--git", "--tree", "-L", "3", "--color=always", path]
-                else exec "bat" ["--color=always", "--style=plain", "--paging=always", "--pager", T.pack pager, "--", path]
+            if cPrev == Diff && st /= Clean then do
+                let da = diffArgs st path
+                piped ("git", da) ("delta", ["--paging=always", "--pager", T.pack pager])
+            else do
+                isDir <- doesDirectoryExist (t path)
+                if isDir
+                    then exec "eza" ["--icons", "--git-ignore", "--git", "--tree", "-L", "3", "--color=always", path]
+                    else exec "bat" ["--color=always", "--style=plain", "--paging=always", "--pager", T.pack pager, "--", path]
 
 queryStackDir :: IO FilePath
 queryStackDir = do
