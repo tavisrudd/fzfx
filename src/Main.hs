@@ -714,7 +714,7 @@ cmdNavigate navAction sel query = do
                 pure $ T.unwords [c | (c, matched) <- matches, not matched]
     let
         nQuery = if navAction == "into" && cFd == FdDirs then cFileQuery else baseQuery
-        nFileQ = if navAction == "into" && cFd == FdDirs then cFileQuery else cFileQuery
+        nFileQ = cFileQuery
         nDirQ = if navAction == "into" && cFd == FdDirs then query else cDirQuery
     setEnv "_FZFX_CWD" (t nCwd')
     setEnv "_FZFX_QUERY" (t nQuery)

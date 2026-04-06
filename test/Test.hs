@@ -4,6 +4,7 @@ module Main (main) where
 
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Maybe (isNothing)
 import System.Exit (exitFailure, exitSuccess)
 
 import Fzfx.Core
@@ -70,17 +71,17 @@ tryRgTests =
     , test "tryRg with multiple colons in text" $
         tryRg "file.hs:1:1:a:b:c" == Just ("file.hs", 1)
     , test "tryRg no match on plain filename" $
-        tryRg "CLAUDE.md" == Nothing
+        isNothing (tryRg "CLAUDE.md")
     , test "tryRg no match on fd line" $
-        tryRg " \tCLAUDE.md" == Nothing
+        isNothing (tryRg " \tCLAUDE.md")
     , test "tryRg empty" $
-        tryRg "" == Nothing
+        isNothing (tryRg "")
     , test "tryRg only colons" $
-        tryRg ":::" == Nothing
+        isNothing (tryRg ":::")
     , test "tryRg non-digit line number" $
-        tryRg "file:abc:1:text" == Nothing
+        isNothing (tryRg "file:abc:1:text")
     , test "tryRg non-digit col" $
-        tryRg "file:1:abc:text" == Nothing
+        isNothing (tryRg "file:1:abc:text")
     , test "tryRg trailing colon (empty text)" $
         tryRg "file:1:1:" == Just ("file", 1)
     , test "tryRg path with dots" $
@@ -90,7 +91,7 @@ tryRgTests =
     , test "tryRg single char file" $
         tryRg "f:1:1:x" == Just ("f", 1)
     , test "tryRg missing text after col" $
-        tryRg "f:1:1" == Nothing
+        isNothing (tryRg "f:1:1")
     ]
 
 -- ═══════════════════════════════════════════════════════════════════════
@@ -258,7 +259,7 @@ interleaveTests =
     , test "interleave empty main" $
         interleave [] ["b", "d"] == ["b", "d"]
     , test "interleave both empty" $
-        interleave [] ([] :: [Text]) == []
+        null (interleave [] ([] :: [Text]))
     , test "interleave merges sorted" $
         interleave ["a", "c", "e"] ["b", "d"] == ["a", "b", "c", "d", "e"]
     , test "interleave extras before first" $
@@ -279,7 +280,7 @@ interleaveTests =
 ordNubTests :: [TestResult]
 ordNubTests =
     [ test "ordNub empty" $
-        ordNub [] == []
+        null (ordNub [] :: [Text])
     , test "ordNub no dupes" $
         ordNub ["a", "b", "c"] == ["a", "b", "c"]
     , test "ordNub removes dupes" $
@@ -317,9 +318,9 @@ subcmdRoundtripTests =
     | sub <- [minBound .. maxBound]
     ]
         <> [ test "parseSubcmd unknown flag" $
-                parseSubcmd "--nonexistent" == Nothing
+                isNothing (parseSubcmd "--nonexistent")
            , test "parseSubcmd empty" $
-                parseSubcmd "" == Nothing
+                isNothing (parseSubcmd "")
            ]
 
 -- ═══════════════════════════════════════════════════════════════════════
@@ -422,7 +423,7 @@ testCfg =
         }
 
 hasAction :: FzfAction -> [FzfAction] -> Bool
-hasAction a = any (== a)
+hasAction = elem
 
 noAction :: FzfAction -> [FzfAction] -> Bool
 noAction a = not . hasAction a
@@ -442,11 +443,11 @@ transitionToggleTests =
     -- @ prefix toggle
     [ test "toggle at_prefix: flips cAt" $
         let (cfg', _) = transition testCfg (EvToggle TgAtPrefix "")
-         in cAt cfg' == True
+         in cAt cfg'
     , test "toggle at_prefix: flips back" $
         let cfg1 = testCfg{cAt = True}
             (cfg', _) = transition cfg1 (EvToggle TgAtPrefix "")
-         in cAt cfg' == False
+         in not (cAt cfg')
     , test "toggle at_prefix: emits header, no reload" $
         let (_, acts) = transition testCfg (EvToggle TgAtPrefix "")
          in hasHeader acts && not (hasReload acts)
@@ -464,14 +465,14 @@ transitionToggleTests =
     , -- hidden toggle
       test "toggle hidden: flips cHid" $
         let (cfg', _) = transition testCfg (EvToggle TgHidden "")
-         in cHid cfg' == True
+         in cHid cfg'
     , test "toggle hidden: emits reload + header" $
         let (_, acts) = transition testCfg (EvToggle TgHidden "")
          in hasReload acts && hasHeader acts
     , -- no-ignore toggle
       test "toggle no_ignore: flips cIgn" $
         let (cfg', _) = transition testCfg (EvToggle TgNoIgnore "")
-         in cIgn cfg' == True
+         in cIgn cfg'
     , test "toggle no_ignore: emits reload + header" $
         let (_, acts) = transition testCfg (EvToggle TgNoIgnore "")
          in hasReload acts && hasHeader acts
@@ -549,11 +550,11 @@ transitionTransformTests =
          in hasAction (ChangePrompt "fzf#> ") acts
     , test "transform: sets cWasRg for rg mode" $
         let (cfg', _) = transition testCfg (EvTransform "#pattern")
-         in cWasRg cfg' == True
+         in cWasRg cfg'
     , test "transform: clears cWasRg for file mode" $
         let cfg1 = testCfg{cWasRg = True}
             (cfg', _) = transition cfg1 (EvTransform "hello")
-         in cWasRg cfg' == False
+         in not (cWasRg cfg')
     , test "transform: auto-switches dirs→files on rg entry" $
         let cfg1 = testCfg{cFd = FdDirs}
             (cfg', acts) = transition cfg1 (EvTransform "#pattern")
@@ -666,7 +667,7 @@ transitionQueryTests =
          in cQueryStack cfg' == ["same", "other"]
     , test "queryPush: empty query is no-op" $
         let (cfg', _) = transition testCfg (EvQueryPush "")
-         in cQueryStack cfg' == []
+         in null (cQueryStack cfg')
     , test "queryPush: no actions emitted" $
         let (_, acts) = transition testCfg (EvQueryPush "q")
          in null acts

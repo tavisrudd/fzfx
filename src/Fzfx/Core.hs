@@ -503,7 +503,7 @@ transition cfg (EvExtraArgs q) =
                                 Just ("#" <> before <> " -- -" <> rest)
                         _ -> Just (q <> " -- -")
                     Nothing -> Nothing
-            FzfRg _ _ _ -> Just (q <> " -- -")
+            FzfRg{} -> Just (q <> " -- -")
             FzfRgPending _ -> Nothing -- no rg pattern yet
             FileMode -> Nothing -- not in rg mode
      in case result of
