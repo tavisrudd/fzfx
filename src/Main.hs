@@ -773,6 +773,7 @@ fzfArgs cfg@Config{..} = baseOpts <> selfBindings <> staticBindings
         , bind "ctrl-alt-g" "preview-top"
         , bind "ctrl-alt-G" "preview-bottom"
         , bind "ctrl-g" "abort"
+        , bind "ctrl-z" "abort"
         , xf cfg "f4" SQueryPush "{q}"
         , xe cfg "f3" SQueryPop "" ("+transform:" <> cSelf <> " " <> flg SQueryApply)
         , bind "zero" ("preview(" <> cSelf <> " " <> flg SPreview <> ")")
