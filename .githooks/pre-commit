@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Pre-commit hook: format check, lint, build with -Werror, tests
+# Skip tests with: SKIP_TESTS=1 git commit
+set -euo pipefail
+
+echo "pre-commit: fourmolu check..."
+fourmolu --mode check src/ test/
+
+echo "pre-commit: hlint..."
+hlint src/ test/
+
+if [ "${SKIP_TESTS:-0}" != "1" ]; then
+  echo "pre-commit: build-strict + test..."
+  cabal test all --ghc-options="-Wall -Wcompat -Werror" --test-show-details=direct 2>&1 | tail -5
+else
+  echo "pre-commit: build-strict (tests skipped)..."
+  cabal build all --enable-tests --ghc-options="-Wall -Wcompat -Werror" 2>&1 | tail -5
+fi
+
+echo "pre-commit: ok"

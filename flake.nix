@@ -30,6 +30,8 @@
             buildInputs = [
               pkgs.cabal-install
               pkgs.haskellPackages.haskell-language-server
+              pkgs.haskellPackages.fourmolu
+              pkgs.haskellPackages.hlint
             ];
           };
         }

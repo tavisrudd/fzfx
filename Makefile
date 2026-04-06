@@ -1,7 +1,10 @@
-.PHONY: build test test-unit test-integration clean
+.PHONY: build build-strict test test-unit test-integration clean lint format format-check dev-setup
 
 build:
 	nix build
+
+build-strict:
+	cabal build all --enable-tests --ghc-options="-Wall -Wcompat -Werror"
 
 test: test-unit test-integration
 
@@ -15,3 +18,15 @@ test-integration: build
 
 clean:
 	rm -rf result dist-newstyle
+
+dev-setup:
+	git config --local core.hooksPath .githooks
+
+lint:
+	hlint src/ test/
+
+format:
+	fourmolu --mode inplace src/ test/
+
+format-check:
+	fourmolu --mode check src/ test/
