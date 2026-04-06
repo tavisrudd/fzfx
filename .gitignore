@@ -1,3 +1,8 @@
 result
 dist-newstyle/
 dist/
+.direnv/
+*.hi
+*.o
+.hie/
+*~
