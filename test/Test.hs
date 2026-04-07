@@ -2,9 +2,9 @@
 
 module Main (main) where
 
+import Data.Maybe (isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Maybe (isNothing)
 import System.Exit (exitFailure, exitSuccess)
 
 import Fzfx.Core
