@@ -48,6 +48,9 @@ module Fzfx.Core (
     interleave,
     ordNub,
 
+    -- * Fzf Action Rendering
+    fzfWrap,
+
     -- * Display
     hdrText,
     gitStatusChar,
@@ -576,7 +579,7 @@ transition cfg (EvTransform q) =
 transition cfg (EvExtraArgs q) =
     let result = case parseQuery q of
             RgLive _ _ -> Just (q <> " -- -")
-            RgLocked pat _ _ ->
+            RgLocked{} ->
                 -- Insert before the second # : #pat → #pat -- -#filter
                 case T.stripPrefix "#" q of
                     Just body -> case T.breakOn "#" body of
@@ -612,7 +615,7 @@ transition cfg (EvSmartEnter isAlt)
 transition cfg (EvQueryPush q) =
     let stack = cQueryStack cfg
         stack' =
-            if T.null q || (not (null stack) && head stack == q)
+            if T.null q || (case stack of x : _ -> x == q; [] -> False)
                 then stack
                 else q : stack
      in (cfg{cQueryStack = stack'}, [])
@@ -629,19 +632,30 @@ reloadAction cfg = ReloadSync (cSelf cfg <> " " <> flg SReload <> " {q}")
 reloadWithQuery :: Config -> Text -> FzfAction
 reloadWithQuery cfg q = ReloadSync (cSelf cfg <> " " <> flg SReload <> " " <> q)
 
+{- | Wrap an fzf action name and argument, choosing a delimiter that doesn't
+conflict with the argument text.  fzf supports () [] <> ~~ as delimiters.
+-}
+fzfWrap :: Text -> Text -> Text
+fzfWrap action arg
+    | not (T.isInfixOf ")" arg) = action <> "(" <> arg <> ")"
+    | not (T.isInfixOf "]" arg) = action <> "[" <> arg <> "]"
+    | not (T.isInfixOf ">" arg) = action <> "<" <> arg <> ">"
+    | not (T.isInfixOf "~" arg) = action <> "~" <> arg <> "~"
+    | otherwise = action <> "(" <> arg <> ")" -- fallback
+
 -- | Render a list of FzfActions to the fzf protocol string
 renderActions :: [FzfAction] -> Text
 renderActions = T.intercalate "+" . map render1
   where
-    render1 (ChangePrompt p) = "change-prompt(" <> p <> ")"
-    render1 (ChangeQuery q) = "change-query(" <> q <> ")"
-    render1 (ChangeFooter h) = "change-border-label(" <> h <> ")"
-    render1 (ReloadSync cmd) = "reload-sync(" <> cmd <> ")"
+    render1 (ChangePrompt p) = fzfWrap "change-prompt" p
+    render1 (ChangeQuery q) = fzfWrap "change-query" q
+    render1 (ChangeFooter h) = fzfWrap "change-border-label" h
+    render1 (ReloadSync cmd) = fzfWrap "reload-sync" cmd
     render1 EnableSearch = "enable-search"
     render1 DisableSearch = "disable-search"
     render1 RefreshPreview = "refresh-preview"
-    render1 (ChangePreviewWindow w) = "change-preview-window(" <> w <> ")"
+    render1 (ChangePreviewWindow w) = fzfWrap "change-preview-window" w
     render1 JumpFirst = "first"
     render1 Accept = "accept"
     render1 (Become cmd) = "become:" <> cmd
-    render1 (Execute cmd) = "execute(" <> cmd <> ")"
+    render1 (Execute cmd) = fzfWrap "execute" cmd

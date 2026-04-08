@@ -424,7 +424,7 @@ queryStackDir = do
 queryStackFile :: Text -> IO FilePath
 queryStackFile gitRoot = do
     dir <- queryStackDir
-    let name = map (\c -> if c == pathSeparator then '_' else c) (t gitRoot)
+    let name = concatMap (\c -> if c == '_' then "__" else if c == pathSeparator then "_" else [c]) (t gitRoot)
     pure $ dir </> name
 
 loadQueryStack :: Text -> IO [Text]
@@ -504,8 +504,7 @@ cmdQueryApply = do
     let sel = cPendingQuery c
     unless (T.null sel) $ do
         void $ modConfig $ \x -> x{cPendingQuery = ""}
-        let rl = "reload-sync(" <> cSelf c <> " " <> flg SReload <> " " <> sel <> ")"
-        TIO.putStr $ rl <> "+change-query(" <> sel <> ")"
+        TIO.putStr $ renderActions [ReloadSync (cSelf c <> " " <> flg SReload <> " " <> sel), ChangeQuery sel]
         hFlush stdout
 
 cmdQueryDelete :: Text -> IO ()

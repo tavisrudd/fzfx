@@ -1,6 +1,16 @@
 cabal-version: 3.0
 name:          fzfx
 version:       0.1.0
+license:       MIT
+license-file:  LICENSE
+author:        Tavis Rudd
+maintainer:    tavis@damnsimple.com
+homepage:      https://github.com/tavisrudd/fzfx
+bug-reports:   https://github.com/tavisrudd/fzfx/issues
+synopsis:      FZF file picker with ripgrep integration
+description:   An interactive file picker combining fd, ripgrep, and fzf with
+               directory navigation, git status filtering, preview, and tmux support.
+category:      Development
 build-type:    Simple
 
 library fzfx-internal

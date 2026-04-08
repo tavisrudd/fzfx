@@ -778,4 +778,19 @@ renderActionsTests =
     , test "renderActions: change-preview-window" $
         renderActions [ChangePreviewWindow "bottom:50%"]
             == "change-preview-window(bottom:50%)"
+    , -- fzfWrap delimiter selection
+      test "fzfWrap: normal text uses parens" $
+        fzfWrap "change-query" "hello" == "change-query(hello)"
+    , test "fzfWrap: text with ) uses brackets" $
+        fzfWrap "change-query" "foo)" == "change-query[foo)]"
+    , test "fzfWrap: text with ) and ] uses angle brackets" $
+        fzfWrap "change-query" "foo)]" == "change-query<foo)]>"
+    , test "fzfWrap: text with ) ] > uses tildes" $
+        fzfWrap "change-query" "foo)]>" == "change-query~foo)]>~"
+    , test "renderActions: query with paren is safe" $
+        let acts = renderActions [ChangeQuery "test)query"]
+         in "change-query[test)query]" == acts
+    , test "renderActions: query with + inside delimiters is safe" $
+        let acts = renderActions [ChangeQuery "a+b"]
+         in "change-query(a+b)" == acts
     ]
