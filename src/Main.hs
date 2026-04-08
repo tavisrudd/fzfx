@@ -6,7 +6,9 @@ module Main (main) where
 
 import Control.Exception (IOException, bracket, bracket_, catch)
 import Control.Monad (unless, void, when)
+import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
+import Data.Char (chr)
 import Data.List (partition, sort)
 import Data.Maybe (fromMaybe)
 import Data.Set qualified as Set
@@ -33,7 +35,8 @@ import System.Environment (getArgs, getExecutablePath, lookupEnv, setEnv)
 import System.FilePath (isAbsolute, pathSeparator, splitDirectories, takeDirectory, takeExtension, (</>))
 import System.FilePath qualified as FP
 import System.IO (hFlush, readFile', stdout)
-import System.Posix.IO (OpenMode (ReadWrite), closeFd, defaultFileFlags, dupTo, fdRead, fdWrite, openFd, stdError, stdInput, stdOutput)
+import System.Posix.IO (OpenMode (ReadWrite), closeFd, defaultFileFlags, dupTo, fdWrite, openFd, stdError, stdInput, stdOutput)
+import System.Posix.IO.ByteString qualified as BSIO
 import System.Posix.Process (executeFile, getProcessID)
 import System.Posix.Terminal (TerminalMode (EnableEcho, ProcessInput), TerminalState (Immediately), getTerminalAttributes, setTerminalAttributes, withoutMode)
 import System.Process.Typed hiding (setEnv)
@@ -614,8 +617,8 @@ getCursorRow =
     readUntil fd end acc
         | length acc > 30 = pure acc
         | otherwise = do
-            (s, _) <- fdRead fd 1
-            let c = head s
+            bs <- BSIO.fdRead fd 1
+            let c = case BS.unpack bs of (x : _) -> chr (fromIntegral x); [] -> end
             if c == end then pure acc else readUntil fd end (acc ++ [c])
     parseRow s = case break (== ';') (dropWhile (\c -> c < '0' || c > '9') s) of
         (rowStr, _) -> case reads rowStr of
@@ -697,24 +700,29 @@ cmdDebug = withCfg $ \cfg -> do
             off label = "\ESC[2m" <> label <> "\ESC[0m"
          in [ "# toggles"
             , ""
-            , "  " <> bold "M-a" <> "  @ prefix    " <> if cAt then on "ON" else off "off"
+            , "  " <> bold "M-a" <> "    @ prefix    " <> if cAt then on "ON" else off "off"
             , "  "
-                <> bold "C-/"
-                <> "  type         "
+                <> bold "C-t"
+                <> "    type         "
                 <> (if cFd == FdDirs then on "dirs" else off "dirs")
                 <> " / "
                 <> (if cFd == FdFiles then on "files" else off "files")
                 <> " / "
                 <> (if cFd == FdMixed then on "mixed" else off "mixed")
-            , "  " <> bold "M-h" <> "  hidden       " <> if cHid then on "ON" else off "off"
-            , "  " <> bold "M-i" <> "  no-ignore    " <> if cIgn then on "ON" else off "off"
+            , "  " <> bold "M-m" <> "    mixed pref   " <> if cMixed then on "ON" else off "off"
+            , "  " <> bold "M-h" <> "    hidden       " <> if cHid then on "ON" else off "off"
+            , "  " <> bold "M-i" <> "    no-ignore    " <> if cIgn then on "ON" else off "off"
+            , "  " <> bold "M-g" <> "    git status   " <> if cGitSt then on "ON" else off "off"
             , "  "
-                <> bold "M-g"
-                <> "  preview      "
+                <> bold "C-M-g"
+                <> "  diff/content "
                 <> (if cPrev == Diff then on "diff" else off "diff")
                 <> " / "
                 <> (if cPrev == Content then on "content" else off "content")
-            , "  " <> bold "M-a" <> "  output       " <> (case cOut of OTmux -> on "tmux"; OStdout -> on "stdout")
+            , "  " <> bold "M-p" <> "    preview      " <> if cPreviewOn then on "ON" else off "off"
+            , "  " <> bold "C-p" <> "    layout       " <> (case cPreviewLayout of PrevRight -> on "right"; PrevBottom -> on "bottom")
+            , "  " <> bold "C-f" <> "    height       " <> if cHeightAuto then on "auto" else on "full"
+            , "  " <> bold "out" <> "    output       " <> (case cOut of OTmux -> on "tmux"; OStdout -> on "stdout")
             ]
     prettifyBash s =
         foldl
@@ -742,9 +750,20 @@ cmdDebug = withCfg $ \cfg -> do
                 , ("cHid", "hidden", showT cHid)
                 , ("cIgn", "no_ignore", showT cIgn)
                 , ("cPrev", "preview_mode", showT cPrev)
+                , ("cGitSt", "git_status", showT cGitSt)
+                , ("cPrevOn", "preview_on", showT cPreviewOn)
+                , ("cPrevLy", "preview_lay", showT cPreviewLayout)
+                , ("cHeight", "height", cHeight)
+                , ("cHtAuto", "height_auto", showT cHeightAuto)
+                , ("cMinHt", "min_height", showT cMinHeight)
+                , ("cPrompt", "prompt", cPrompt)
+                , ("cMixed", "mixed", showT cMixed)
+                , ("cFileQ", "file_query", cFileQuery)
+                , ("cDirQ", "dir_query", cDirQuery)
+                , ("cWasRg", "was_rg", showT cWasRg)
                 ]
             pad n s = s <> T.replicate (max 0 (n - T.length s)) " "
-         in map (\(f, desc, v) -> pad 7 f <> pad 14 desc <> " = " <> v) fields
+         in map (\(f, desc, v) -> pad 8 f <> pad 14 desc <> " = " <> v) fields
 
 cmdSwap :: Text -> IO ()
 cmdSwap q = do
@@ -957,7 +976,7 @@ isGitIgnored dir = do
                     | line <- lines content
                     , let l = dropWhile (== ' ') line
                     , not (null l)
-                    , head l /= '#'
+                    , '#' `notElem` take 1 l
                     ]
             canonPaths <- mapM (\p -> catch (canonicalizePath p) (\(_ :: IOException) -> pure p)) paths
             canonDir <- catch (canonicalizePath (t dir)) (\(_ :: IOException) -> pure (t dir))
@@ -1087,6 +1106,8 @@ fzfArgs cfg@Config{..} = baseOpts <> selfBindings <> staticBindings
         , bind "alt-space" "preview-page-down"
         , bind "ctrl-space" "preview-page-up"
         , xf cfg "ctrl-alt-g" SToggle "diff"
+        , bind "ctrl-alt-r" ("reload-sync(" <> cSelf <> " " <> flg SReload <> " {q})")
+        , bind "ctrl-h" ("execute(" <> cSelf <> " --help | less -R)")
         , bind "ctrl-g" "abort"
         , bind "ctrl-z" "abort"
         , xf cfg "f4" SQueryPush "{q}"
@@ -1292,6 +1313,7 @@ keybindingsHelp =
         , "  alt-/           full-screen preview in less"
         , "  alt-g           toggle git status filter"
         , "  ctrl-alt-g      toggle diff preview"
+        , "  alt-m           toggle mixed mode (files+dirs)"
         , "  alt-t           tokei stats for selection dir"
         , "  alt-c           copy path to tmux buffer"
         , "  alt-,           magit file status"
@@ -1305,7 +1327,7 @@ keybindingsHelp =
         , "  alt-h           show/hide hidden files"
         , "  alt-i           toggle no-ignore"
         , "  alt--           extra args for fd/rg"
-        , "  ctrl-t          toggle files/dirs"
+        , "  ctrl-t          toggle files/dirs/mixed"
         , "  alt-u/s/?       filter by git status"
         , "  ctrl-p          toggle preview layout (right/bottom)"
         , "  alt-p           toggle preview"
@@ -1313,6 +1335,10 @@ keybindingsHelp =
         , "  alt-{/}         preview half-page up/down"
         , "  alt-space       preview page down"
         , "  ctrl-space      preview page up"
+        , "  ctrl-f          toggle height (full/auto)"
+        , "  ctrl-alt-r      reload"
+        , "  ctrl-h          show help in pager"
+        , "  ctrl-alt-d      debug info"
         , "  f4              push query to stack"
         , "  f3              browse/restore query stack"
         , "  alt-k           clear query"
@@ -1327,26 +1353,32 @@ keybindingsHelp =
         , "  \\#<text>        literal # in file search"
         , ""
         , "Environment (overridden by flags):"
-        , "  _FZFX_CWD         starting directory        (--cwd)"
-        , "  _FZFX_OUTPUT_MODE output mode               (--output)"
-        , "  _FZFX_FDTYPE      file type filter           (--type)"
-        , "  _FZFX_HIDDEN      show hidden files          (--hidden)"
-        , "  _FZFX_PANE        tmux target pane           (--pane)"
-        , "  _FZFX_ORIG_CWD    original cwd (toggle_root)"
-        , "  _FZFX_QUERY       initial query"
-        , "  _FZFX_AT_PREFIX   @ prefix (0/1)            (--at-prefix)"
-        , "  _FZFX_GIT_STATUS  git status filter (0/1)   (--git-status)"
-        , "  _FZFX_PREVIEW      preview on/off (0/1)     (--preview/--no-preview)"
-        , "  _FZFX_PREVIEW_LAYOUT  preview position       (--preview-layout)"
-        , "  _FZFX_HEIGHT       fzf height                (--height)"
+        , "  _FZFX_CWD             starting directory      (--cwd)"
+        , "  _FZFX_OUTPUT_MODE     output mode             (--output)"
+        , "  _FZFX_FDTYPE          file type filter        (--type)"
+        , "  _FZFX_HIDDEN          show hidden files       (--hidden)"
+        , "  _FZFX_PANE            tmux target pane        (--pane)"
+        , "  _FZFX_ORIG_CWD        original cwd            (toggle_root)"
+        , "  _FZFX_QUERY           initial query"
+        , "  _FZFX_AT_PREFIX       @ prefix (0/1)          (--at-prefix)"
+        , "  _FZFX_GIT_STATUS      git status filter (0/1) (--git-status)"
+        , "  _FZFX_PREVIEW         preview on/off (0/1)    (--preview/--no-preview)"
+        , "  _FZFX_PREVIEW_LAYOUT  preview position        (--preview-layout)"
+        , "  _FZFX_HEIGHT          fzf height              (--height)"
         , ""
         , "Internal (set automatically during re-launch):"
-        , "  _FZFX_STATE_DIR      temp state directory"
-        , "  _FZFX_FILE_QUERY     saved file-mode query"
-        , "  _FZFX_DIR_QUERY      saved dir-mode query"
-        , "  _FZFX_SAVED_FILE_SEL saved file selections"
-        , "  _FZFX_SAVED_DIR_SEL  saved dir selections"
-        , "  ctrl-alt-d           debug info"
+        , "  _FZFX_STATE_DIR       temp state directory"
+        , "  _FZFX_FILE_QUERY      saved file-mode query"
+        , "  _FZFX_DIR_QUERY       saved dir-mode query"
+        , "  _FZFX_SAVED_FILE_SEL  saved file selections"
+        , "  _FZFX_SAVED_DIR_SEL   saved dir selections"
+        , "  _FZFX_NO_IGNORE       no-ignore state (0/1)"
+        , "  _FZFX_PREV_MODE       preview mode (diff/content)"
+        , "  _FZFX_PROMPT          custom prompt"
+        , "  _FZFX_MIXED           mixed mode pref (0/1)"
+        , ""
+        , "Config:"
+        , "  ~/.fzfx-git-ignore   skip git ops for listed repo paths"
         ]
 
 optsInfo :: ParserInfo RunOpts
