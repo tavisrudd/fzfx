@@ -150,8 +150,8 @@ assert_prompt() {
 test_basic_launch() {
     echo "# test_basic_launch"
     launch_fzfx
-    wait_for "files>" 3 || true
-    assert_prompt "shows files prompt" "files>"
+    wait_for "mixed>" 3 || true
+    assert_prompt "shows mixed prompt" "mixed>"
     assert_contains "lists src/Main.hs" "Main.hs"
     assert_contains "lists README.md" "README.md"
     send "C-g"  # abort
@@ -161,7 +161,7 @@ test_basic_launch() {
 test_file_filtering() {
     echo "# test_file_filtering"
     launch_fzfx
-    wait_for "files>" 3 || true
+    wait_for "mixed>" 3 || true
     send "Main"
     sleep 0.5
     assert_contains "filters to Main.hs" "Main.hs"
@@ -173,7 +173,7 @@ test_file_filtering() {
 test_rg_mode_switch() {
     echo "# test_rg_mode_switch"
     launch_fzfx
-    wait_for "files>" 3 || true
+    wait_for "mixed>" 3 || true
     # Clear query and type rg query
     send "C-u"
     sleep 0.2
@@ -188,7 +188,7 @@ test_rg_mode_switch() {
 test_rg_locked_mode() {
     echo "# test_rg_locked_mode"
     launch_fzfx
-    wait_for "files>" 3 || true
+    wait_for "mixed>" 3 || true
     send "C-u"
     sleep 0.2
     send "#import#"
@@ -201,7 +201,7 @@ test_rg_locked_mode() {
 test_toggle_hidden() {
     echo "# test_toggle_hidden"
     launch_fzfx
-    wait_for "files>" 3 || true
+    wait_for "mixed>" 3 || true
     assert_not_contains "hidden file not shown initially" ".hidden"
     send "M-h"  # toggle hidden
     sleep 0.8
@@ -213,14 +213,14 @@ test_toggle_hidden() {
 test_toggle_dirs_mode() {
     echo "# test_toggle_dirs_mode"
     launch_fzfx
-    wait_for "files>" 3 || true
-    send "C-/"  # toggle to dirs
+    wait_for "mixed>" 3 || true
+    send "C-t"  # toggle to dirs
     sleep 0.8
     assert_prompt "switches to dirs prompt" "dirs>"
     assert_contains "shows sub directory" "sub"
-    send "C-/"  # toggle back to files
+    send "C-t"  # toggle back to files
     sleep 0.8
-    assert_prompt "switches back to files prompt" "files>"
+    assert_prompt "switches back to mixed prompt" "mixed>"
     send "C-g"
     sleep 0.3
 }
@@ -228,7 +228,7 @@ test_toggle_dirs_mode() {
 test_git_status_display() {
     echo "# test_git_status_display"
     launch_fzfx
-    wait_for "files>" 3 || true
+    wait_for "mixed>" 3 || true
     # README.md was modified (unstaged), should show U marker
     assert_contains "shows unstaged marker" "U"
     send "C-g"
@@ -238,8 +238,8 @@ test_git_status_display() {
 test_navigate_into_dir() {
     echo "# test_navigate_into_dir"
     launch_fzfx
-    wait_for "files>" 3 || true
-    send "C-/"  # switch to dirs
+    wait_for "mixed>" 3 || true
+    send "C-t"  # switch to dirs
     sleep 0.8
     # Select "sub" and navigate into it
     send "C-u"
@@ -249,7 +249,7 @@ test_navigate_into_dir() {
     send "C-o"  # navigate into
     sleep 1
     # After navigating into sub, should show files in sub/
-    assert_prompt "shows files prompt after navigate" "files>"
+    assert_prompt "shows mixed prompt after navigate" "mixed>"
     assert_contains "shows nested dir content" "nested.txt"
     send "C-g"
     sleep 0.3
@@ -258,8 +258,8 @@ test_navigate_into_dir() {
 test_navigate_up() {
     echo "# test_navigate_into_then_up"
     launch_fzfx
-    wait_for "files>" 3 || true
-    send "C-/"  # dirs mode
+    wait_for "mixed>" 3 || true
+    send "C-t"  # dirs mode
     sleep 0.8
     send "C-u"
     sleep 0.2
@@ -277,7 +277,7 @@ test_navigate_up() {
 test_swap_query_format() {
     echo "# test_swap_query_format"
     launch_fzfx
-    wait_for "files>" 3 || true
+    wait_for "mixed>" 3 || true
     send "C-u"
     sleep 0.2
     send "#hello"
@@ -294,7 +294,7 @@ test_swap_query_format() {
 test_diff_preview_toggle() {
     echo "# test_diff_preview_toggle"
     launch_fzfx
-    wait_for "files>" 3 || true
+    wait_for "mixed>" 3 || true
     send "M-g"  # toggle diff preview
     sleep 0.5
     # The header should update to show diff mode active
@@ -306,7 +306,7 @@ test_diff_preview_toggle() {
 test_status_filter() {
     echo "# test_status_filter"
     launch_fzfx
-    wait_for "files>" 3 || true
+    wait_for "mixed>" 3 || true
     send "M-u"  # filter to unstaged
     sleep 0.8
     # Should show only unstaged files (README.md is modified)
@@ -318,14 +318,14 @@ test_status_filter() {
 test_progressive_navigate_down_and_up() {
     echo "# test_progressive_navigate_down_and_up"
     launch_fzfx
-    wait_for "files>" 3 || true
+    wait_for "mixed>" 3 || true
 
     # --- Level 0: project root ---
     assert_contains "L0: root has README" "README.md"
     assert_contains "L0: root has src/Main.hs" "Main.hs"
 
     # Switch to dirs mode
-    send "C-/"
+    send "C-t"
     sleep 0.8
     assert_prompt "L0: dirs prompt" "dirs>"
     assert_contains "L0: dirs shows sub" "sub"
@@ -337,13 +337,13 @@ test_progressive_navigate_down_and_up() {
     sleep 0.5
     send "C-o"  # navigate into sub
     sleep 1.2
-    wait_for "files>" 3 || true
+    wait_for "mixed>" 3 || true
 
     # Should now be in sub/, showing its files
     assert_contains "L1: sub has mid.txt" "mid.txt"
 
     # Switch to dirs to go deeper
-    send "C-/"
+    send "C-t"
     sleep 0.8
     send "C-u"  # clear any leftover query
     sleep 0.5
@@ -355,12 +355,12 @@ test_progressive_navigate_down_and_up() {
     sleep 0.5
     send "C-o"  # navigate into deep
     sleep 1.2
-    wait_for "files>" 3 || true
+    wait_for "mixed>" 3 || true
 
     assert_contains "L2: deep has nested.txt" "nested.txt"
 
     # Switch to dirs to go deeper
-    send "C-/"
+    send "C-t"
     sleep 0.8
     send "C-u"  # clear any leftover query
     sleep 0.5
@@ -371,24 +371,24 @@ test_progressive_navigate_down_and_up() {
     sleep 0.5
     send "C-o"
     sleep 1.2
-    wait_for "files>" 3 || true
+    wait_for "mixed>" 3 || true
 
     assert_contains "L3: bottom has floor.txt" "floor.txt"
 
     # --- Now ascend back up: C-l ---
     send "C-l"  # up from bottom → deep
     sleep 1.2
-    wait_for "files>" 3 || true
+    wait_for "mixed>" 3 || true
     assert_contains "L2 back: deep has nested.txt" "nested.txt"
 
     send "C-l"  # up from deep → sub
     sleep 1.2
-    wait_for "files>" 3 || true
+    wait_for "mixed>" 3 || true
     assert_contains "L1 back: sub has mid.txt" "mid.txt"
 
     send "C-l"  # up from sub → root
     sleep 1.2
-    wait_for "files>" 3 || true
+    wait_for "mixed>" 3 || true
     assert_contains "L0 back: root has README" "README.md"
     assert_contains "L0 back: root has Main.hs" "Main.hs"
 
@@ -399,10 +399,10 @@ test_progressive_navigate_down_and_up() {
 test_navigate_alt_l_into_top() {
     echo "# test_navigate_alt_l_into_top"
     launch_fzfx
-    wait_for "files>" 3 || true
+    wait_for "mixed>" 3 || true
 
     # Switch to dirs mode
-    send "C-/"
+    send "C-t"
     sleep 0.8
 
     # Select "sub" (which has sub/deep/bottom structure)
@@ -413,7 +413,7 @@ test_navigate_alt_l_into_top() {
     sleep 0.5
     send "M-l"  # alt-l = into_top
     sleep 1.2
-    wait_for "files>" 3 || true
+    wait_for "mixed>" 3 || true
 
     # into_top stays in dirs mode — should show sub's subdirectories
     assert_prompt "into_top: dirs prompt" "dirs>"
@@ -432,10 +432,10 @@ test_navigate_alt_l_into_top() {
 test_navigate_ctrl_r_to_root() {
     echo "# test_navigate_ctrl_r_to_root"
     launch_fzfx
-    wait_for "files>" 3 || true
+    wait_for "mixed>" 3 || true
 
     # Navigate into sub/deep
-    send "C-/"
+    send "C-t"
     sleep 0.8
     send "C-u"
     sleep 0.2
@@ -443,7 +443,7 @@ test_navigate_ctrl_r_to_root() {
     sleep 0.5
     send "C-o"
     sleep 1.2
-    send "C-/"
+    send "C-t"
     sleep 0.8
     send "C-u"
     sleep 0.2
@@ -451,13 +451,13 @@ test_navigate_ctrl_r_to_root() {
     sleep 0.5
     send "C-o"
     sleep 1.2
-    wait_for "files>" 3 || true
+    wait_for "mixed>" 3 || true
     assert_contains "in deep: has nested.txt" "nested.txt"
 
     # C-r should jump straight to git root
     send "C-r"
     sleep 1.2
-    wait_for "files>" 3 || true
+    wait_for "mixed>" 3 || true
     assert_contains "ctrl-r: back at root with README" "README.md"
     assert_contains "ctrl-r: back at root with Main.hs" "Main.hs"
 

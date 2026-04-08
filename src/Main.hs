@@ -4,7 +4,7 @@
 
 module Main (main) where
 
-import Control.Exception (IOException, bracket, catch)
+import Control.Exception (IOException, bracket, bracket_, catch)
 import Control.Monad (unless, void, when)
 import Data.ByteString.Lazy qualified as LBS
 import Data.List (partition, sort)
@@ -32,8 +32,9 @@ import System.Environment (getArgs, getExecutablePath, lookupEnv, setEnv)
 import System.FilePath (isAbsolute, pathSeparator, splitDirectories, takeDirectory, takeExtension, (</>))
 import System.FilePath qualified as FP
 import System.IO (hFlush, readFile', stdout)
-import System.Posix.IO (dupTo, stdError, stdInput, stdOutput)
+import System.Posix.IO (OpenMode (ReadWrite), closeFd, defaultFileFlags, dupTo, fdRead, fdWrite, openFd, stdError, stdInput, stdOutput)
 import System.Posix.Process (executeFile, getProcessID)
+import System.Posix.Terminal (TerminalMode (EnableEcho, ProcessInput), TerminalState (Immediately), getTerminalAttributes, setTerminalAttributes, withoutMode)
 import System.Process.Typed hiding (setEnv)
 
 import Fzfx.Core
@@ -152,21 +153,23 @@ cmdReload q = withCfg $ \cfg ->
 reloadFiles :: Config -> Text -> IO ()
 reloadFiles Config{..} query = do
     let (sf, _) = parseSFilter query
-        ty = case cFd of FdFiles -> "f"; FdDirs -> "d"
+        tyArgs = case cFd of
+            FdFiles -> ["--type", "f"]
+            FdDirs -> ["--type", "d"]
+            FdMixed -> ["--type", "f", "--type", "d"]
         fa =
-            [ "--type"
-            , ty
-            , "--exclude"
-            , ".git"
-            , "--exclude"
-            , "node_modules"
-            , "--strip-cwd-prefix"
-            ]
+            tyArgs
+                <> [ "--exclude"
+                   , ".git"
+                   , "--exclude"
+                   , "node_modules"
+                   , "--strip-cwd-prefix"
+                   ]
                 <> ["--hidden" | cHid]
                 <> ["-L"]
                 <> ["--no-ignore-vcs" | cIgn]
     out <- readProc "fd" fa
-    extraFiles <- loadFzfxInclude ty
+    extraFiles <- loadFzfxInclude tyArgs
     let mainFiles = sort $ filter (not . T.null) (T.lines out)
         mainSet = Set.fromList mainFiles
         newExtras = sort $ filter (\f -> not (Set.member f mainSet)) extraFiles
@@ -198,13 +201,16 @@ reloadFiles Config{..} query = do
                                 | anyUnder s d -> Staged
                                 | anyUnder tr d -> Untracked
                                 | otherwise -> Clean
-                    classify f = if cFd == FdDirs then classifyDir f else classifyFile f
+                    classify f = case cFd of
+                        FdDirs -> classifyDir f
+                        FdFiles -> classifyFile f
+                        FdMixed -> let fs = classifyFile f in if fs /= Clean then fs else classifyDir f
                 pure [(classify f, f) | f <- files]
     let statusOk = filter (\(st, _) -> maybe True (== st) sf) labeled
         ok = if cGitSt then filter (\(st, _) -> st /= Clean) statusOk else statusOk
         (top, bot) = partition (\(_, f) -> "src/" `T.isPrefixOf` f) ok
         dotEntry
-            | cFd /= FdDirs = []
+            | cFd == FdFiles = []
             | any (\(st, _) -> st == Unstaged) labeled = [(Unstaged, ".")]
             | any (\(st, _) -> st == Staged) labeled = [(Staged, ".")]
             | any (\(st, _) -> st == Untracked) labeled = [(Untracked, ".")]
@@ -213,6 +219,7 @@ reloadFiles Config{..} query = do
         -- Compute positions of saved selections for restore
         savedSel = case cFd of
             FdFiles -> Set.fromList cSavedFileSel
+            FdMixed -> Set.fromList cSavedFileSel
             FdDirs -> Set.fromList cSavedDirSel
     cwd <- T.pack <$> getCurrentDirectory
     let toAbs f = if isAbsolute (t f) then f else T.pack (t cwd </> t f)
@@ -223,6 +230,7 @@ reloadFiles Config{..} query = do
         -- Clear saved selections after computing positions
         case cFd of
             FdFiles -> void $ modConfig $ \x -> x{cSavedFileSel = []}
+            FdMixed -> void $ modConfig $ \x -> x{cSavedFileSel = []}
             FdDirs -> void $ modConfig $ \x -> x{cSavedDirSel = []}
     -- Write stats for preview sizing
     let maxW = if null final then 0 else maximum [T.length f + 2 | (_, f) <- final]
@@ -231,8 +239,8 @@ reloadFiles Config{..} query = do
     mapM_ (\(st, f) -> TIO.putStrLn (gitStatusChar st <> "\t" <> f)) final
     hFlush stdout
 
-loadFzfxInclude :: Text -> IO [Text]
-loadFzfxInclude ty = do
+loadFzfxInclude :: [Text] -> IO [Text]
+loadFzfxInclude tyArgs = do
     let includeFile = ".fzfxinclude"
     exists <- doesFileExist includeFile
     if not exists
@@ -244,14 +252,13 @@ loadFzfxInclude ty = do
                 then pure []
                 else do
                     let fa =
-                            [ "--type"
-                            , ty
-                            , "--no-ignore"
-                            , "--hidden"
-                            , "-L"
-                            , "--exclude"
-                            , ".git"
-                            ]
+                            tyArgs
+                                <> [ "--no-ignore"
+                                   , "--hidden"
+                                   , "-L"
+                                   , "--exclude"
+                                   , ".git"
+                                   ]
                                 <> concatMap (\p -> ["--search-path", p]) paths
                     let strip f = fromMaybe f (T.stripPrefix "./" f)
                     catch
@@ -575,6 +582,55 @@ reopenTty = do
     _ <- dupTo stdError stdInput
     void $ dupTo stdError stdOutput
 
+-- | Get terminal rows via stty on /dev/tty.
+getTermRows :: IO Int
+getTermRows = do
+    out <- readProcMaybe "stty" ["-F", "/dev/tty", "size"]
+    pure $ case out of
+        Just s -> case reads (T.unpack s) of [(n, _)] -> n; _ -> 40
+        Nothing -> 40
+
+{- | Query cursor row via ANSI DSR on /dev/tty.
+Saves and restores full terminal attributes to avoid corrupting readline state.
+-}
+getCursorRow :: IO (Maybe Int)
+getCursorRow =
+    catch go (\(_ :: IOException) -> pure Nothing)
+  where
+    go = do
+        fd <- openFd "/dev/tty" ReadWrite defaultFileFlags
+        savedAttrs <- getTerminalAttributes fd
+        let rawAttrs = withoutMode (withoutMode savedAttrs EnableEcho) ProcessInput
+        bracket_
+            (setTerminalAttributes fd rawAttrs Immediately)
+            (setTerminalAttributes fd savedAttrs Immediately >> closeFd fd)
+            ( do
+                _ <- fdWrite fd "\ESC[6n"
+                resp <- readUntil fd 'R' ""
+                pure $ parseRow resp
+            )
+    readUntil fd end acc
+        | length acc > 30 = pure acc
+        | otherwise = do
+            (s, _) <- fdRead fd 1
+            let c = head s
+            if c == end then pure acc else readUntil fd end (acc ++ [c])
+    parseRow s = case break (== ';') (dropWhile (\c -> c < '0' || c > '9') s) of
+        (rowStr, _) -> case reads rowStr of
+            [(n, _)] -> Just n
+            _ -> Nothing
+
+-- | Resolve "auto" height: space below cursor, min 50% of terminal.
+resolveAutoHeight :: IO (Text, Int)
+resolveAutoHeight = do
+    termH <- getTermRows
+    mRow <- getCursorRow
+    let minH = max 10 (termH `div` 2)
+        h = case mRow of
+            Just row -> max minH (termH - row)
+            Nothing -> minH
+    pure (showT h, 0)
+
 cmdPreviewWidth :: IO ()
 cmdPreviewWidth = withCfg $ \Config{..} -> do
     let widthFile = t cDir </> "max-width"
@@ -646,6 +702,8 @@ cmdDebug = withCfg $ \cfg -> do
                 <> (if cFd == FdDirs then on "dirs" else off "dirs")
                 <> " / "
                 <> (if cFd == FdFiles then on "files" else off "files")
+                <> " / "
+                <> (if cFd == FdMixed then on "mixed" else off "mixed")
             , "  " <> bold "M-h" <> "  hidden       " <> if cHid then on "ON" else off "off"
             , "  " <> bold "M-i" <> "  no-ignore    " <> if cIgn then on "ON" else off "off"
             , "  "
@@ -725,11 +783,17 @@ cmdCopy line = do
         setStdin (byteStringInput (LBS.fromStrict (TE.encodeUtf8 path))) $
             proc "tmux" ["load-buffer", "-w", "-"]
 
+-- | Drop ChangePrompt actions when a custom prompt override is set
+filterPrompt :: Config -> [FzfAction] -> [FzfAction]
+filterPrompt cfg
+    | T.null (cPrompt cfg) = id
+    | otherwise = filter (\case ChangePrompt{} -> False; _ -> True)
+
 cmdTransform :: Text -> IO ()
 cmdTransform q = withCfg $ \cfg -> do
     let (cfg', actions) = transition cfg (EvTransform q)
     saveConfig cfg'
-    TIO.putStr (renderActions actions)
+    TIO.putStr (renderActions (filterPrompt cfg' actions))
     hFlush stdout
 
 cmdToggle :: Text -> IO ()
@@ -747,11 +811,13 @@ cmdToggle nameAndArgs = do
             "type_toggle" -> TgType
             "type_d" -> TgTypeD
             "type_f" -> TgTypeF
+            "type_mixed" -> TgTypeMixed
+            "mixed" -> TgMixed
             _ -> TgAtPrefix -- fallback, no-op if already matching
         (cfg', actions) = transition cfg (EvToggle tgName curQ)
     unless (null actions) $ do
         saveConfig cfg'
-        TIO.putStr (renderActions actions)
+        TIO.putStr (renderActions (filterPrompt cfg' actions))
         hFlush stdout
 
 cmdNavigate :: Text -> Text -> Text -> IO ()
@@ -785,7 +851,7 @@ cmdNavigate navAction sel query = do
         _ -> pure cCwd
     let nCwd' = T.dropWhileEnd (== pathSeparator) $ T.pack $ FP.normalise $ t nCwd
     nGit <- detectGit nCwd'
-    let nFd = if navAction == "into" then FdFiles else cFd
+    let nFd = if navAction == "into" && cFd == FdDirs then defaultFdType else cFd
         -- Dir segments that will disappear after navigation
         vanishingDirs = case navAction of
             "into" -> map T.pack $ splitDirectories (t sp)
@@ -815,7 +881,7 @@ cmdNavigate navAction sel query = do
     setEnv "_FZFX_CWD" (t nCwd')
     setEnv "_FZFX_QUERY" (t nQuery)
     setEnv "_FZFX_AT_PREFIX" (if cAt then "1" else "0")
-    setEnv "_FZFX_FDTYPE" (case nFd of FdFiles -> "f"; FdDirs -> "d")
+    setEnv "_FZFX_FDTYPE" (t $ fdTypeEnv nFd)
     setEnv "_FZFX_HIDDEN" (if cHid then "--hidden" else "")
     -- Auto-disable git-status when navigating to a dir with no dirty files
     nGitSt <-
@@ -829,6 +895,7 @@ cmdNavigate navAction sel query = do
     setEnv "_FZFX_PREV_MODE" (if nPrev == Diff then "diff" else "content")
     setEnv "_FZFX_PREVIEW" (if cPreviewOn then "1" else "0")
     setEnv "_FZFX_PREVIEW_LAYOUT" (case cPreviewLayout of PrevRight -> "right"; PrevBottom -> "bottom")
+    setEnv "_FZFX_HEIGHT" (t cHeight)
     setEnv "_FZFX_FILE_QUERY" (t nFileQ)
     setEnv "_FZFX_DIR_QUERY" (t nDirQ)
     setEnv "_FZFX_SAVED_FILE_SEL" (t (T.intercalate "\n" cSavedFileSel))
@@ -848,12 +915,13 @@ cmdZoxide _query = do
                 setEnv "_FZFX_CWD" (t nCwd)
                 setEnv "_FZFX_QUERY" ""
                 setEnv "_FZFX_AT_PREFIX" (if cAt then "1" else "0")
-                setEnv "_FZFX_FDTYPE" (case cFd of FdFiles -> "f"; FdDirs -> "d")
+                setEnv "_FZFX_FDTYPE" (t $ fdTypeEnv defaultFdType)
                 setEnv "_FZFX_HIDDEN" (if cHid then "--hidden" else "")
                 setEnv "_FZFX_GIT_STATUS" (if cGitSt then "1" else "0")
                 setEnv "_FZFX_PREV_MODE" (if cPrev == Diff then "diff" else "content")
                 setEnv "_FZFX_PREVIEW" (if cPreviewOn then "1" else "0")
                 setEnv "_FZFX_PREVIEW_LAYOUT" (case cPreviewLayout of PrevRight -> "right"; PrevBottom -> "bottom")
+                setEnv "_FZFX_HEIGHT" (t cHeight)
                 setEnv "_FZFX_FILE_QUERY" ""
                 setEnv "_FZFX_DIR_QUERY" ""
                 setEnv "_FZFX_SAVED_FILE_SEL" ""
@@ -885,7 +953,7 @@ Uses FZF_SELECT_COUNT to avoid saving the cursor item when nothing is selected.
 -}
 selSavePrefix :: Config -> Text
 selSavePrefix Config{..} =
-    let mode = case cFd of FdFiles -> "file"; FdDirs -> "dir"
+    let mode = case cFd of FdFiles -> "file"; FdDirs -> "dir"; FdMixed -> "file"
      in "execute-silent([ \"$FZF_SELECT_COUNT\" -gt 0 ] && printf '%s\\n' {+2} | "
             <> cSelf
             <> " "
@@ -929,14 +997,17 @@ fzfArgs cfg@Config{..} = baseOpts <> selfBindings <> staticBindings
         , "--border=bottom"
         , "--border-label=" <> hdrText cfg
         , "--border-label-pos=bottom"
-        , "--prompt=" <> (if cFd == FdDirs then "dirs" else "files") <> "> "
-        , "--query=" <> cQuery
-        , "--preview=" <> cSelf <> " " <> flg SPreview <> " {}"
-        , "--preview-window="
-            <> (case cPreviewLayout of PrevRight -> "right"; PrevBottom -> "bottom")
-            <> ":50%"
-            <> (if cPreviewOn then "" else ":hidden")
+        , "--prompt=" <> if T.null cPrompt then (case cFd of FdDirs -> "dirs"; FdMixed -> "mixed"; FdFiles -> "files") <> "> " else cPrompt
+        , "--height=" <> cHeight
         ]
+            <> ["--min-height=" <> showT cMinHeight | cMinHeight > 0]
+            <> [ "--query=" <> cQuery
+               , "--preview=" <> cSelf <> " " <> flg SPreview <> " {}"
+               , "--preview-window="
+                    <> (case cPreviewLayout of PrevRight -> "right"; PrevBottom -> "bottom")
+                    <> ":50%"
+                    <> (if cPreviewOn then "" else ":hidden")
+               ]
     selfBindings =
         [ xf cfg "change" STransform "{q}"
         , xf cfg "alt-a" SToggle "at_prefix"
@@ -947,6 +1018,7 @@ fzfArgs cfg@Config{..} = baseOpts <> selfBindings <> staticBindings
         , bind "alt-?" (statusToggle "?")
         , xf cfg "alt-h" SToggle "hidden"
         , xf cfg "alt-i" SToggle "no_ignore"
+        , xf cfg "alt-m" SToggle "mixed"
         , bind "ctrl-t" (selSavePrefix cfg <> "transform:" <> cSelf <> " " <> flg SToggle <> " type_toggle {q}")
         , bc cfg "ctrl-o" SNavigate "into {} {q}"
         , bc cfg "alt-o" SNavigate "into_top {} {q}"
@@ -1035,13 +1107,29 @@ data RunOpts = RunOpts
     , optGitStatus :: !Bool
     , optPreview :: !(Maybe Bool)
     , optPreviewLayout :: !(Maybe PreviewLayout)
+    , optHeight :: !(Maybe Text)
+    , optPrompt :: !(Maybe Text)
     , optPane :: !(Maybe Text)
     , optQuery :: ![Text]
     }
 
 -- | All-default opts for internal re-launch (state comes from env vars)
 defaultRunOpts :: RunOpts
-defaultRunOpts = RunOpts Nothing Nothing Nothing False False False Nothing Nothing Nothing []
+defaultRunOpts =
+    RunOpts
+        { optCwd = Nothing
+        , optOutput = Nothing
+        , optType = Nothing
+        , optHidden = False
+        , optAtPrefix = False
+        , optGitStatus = False
+        , optPreview = Nothing
+        , optPreviewLayout = Nothing
+        , optHeight = Nothing
+        , optPrompt = Nothing
+        , optPane = Nothing
+        , optQuery = []
+        }
 
 parseOutMode :: ReadM OutMode
 parseOutMode = eitherReader $ \case
@@ -1059,9 +1147,11 @@ parseFdType :: ReadM FdType
 parseFdType = eitherReader $ \case
     "f" -> Right FdFiles
     "d" -> Right FdDirs
+    "m" -> Right FdMixed
     "files" -> Right FdFiles
     "dirs" -> Right FdDirs
-    s -> Left $ "unknown type: " <> s <> " (expected f|d|files|dirs)"
+    "mixed" -> Right FdMixed
+    s -> Left $ "unknown type: " <> s <> " (expected f|d|m|files|dirs|mixed)"
 
 runOptsParser :: Parser RunOpts
 runOptsParser =
@@ -1090,7 +1180,7 @@ runOptsParser =
                 ( long "type"
                     <> short 't'
                     <> metavar "TYPE"
-                    <> help "File type filter (f|d|files|dirs)"
+                    <> help "File type filter (f|d|m|files|dirs|mixed)"
                 )
             )
         <*> switch
@@ -1118,6 +1208,22 @@ runOptsParser =
                     <> metavar "LAYOUT"
                     <> help "Preview position (right|bottom)"
                 )
+            )
+        <*> optional
+            ( T.pack
+                <$> strOption
+                    ( long "height"
+                        <> metavar "HEIGHT"
+                        <> help "FZF height (e.g. 40%, 100%, auto)"
+                    )
+            )
+        <*> optional
+            ( T.pack
+                <$> strOption
+                    ( long "prompt"
+                        <> metavar "PROMPT"
+                        <> help "Override fzf prompt string"
+                    )
             )
         <*> optional
             ( T.pack
@@ -1196,6 +1302,7 @@ keybindingsHelp =
         , "  _FZFX_GIT_STATUS  git status filter (0/1)   (--git-status)"
         , "  _FZFX_PREVIEW      preview on/off (0/1)     (--preview/--no-preview)"
         , "  _FZFX_PREVIEW_LAYOUT  preview position       (--preview-layout)"
+        , "  _FZFX_HEIGHT       fzf height                (--height)"
         , ""
         , "Internal (set automatically during re-launch):"
         , "  _FZFX_STATE_DIR      temp state directory"
@@ -1259,7 +1366,7 @@ mainLaunch RunOpts{..} = do
             else (== "1") <$> envOr "_FZFX_AT_PREFIX" "0"
     fd <- case optType of
         Just ty -> pure ty
-        Nothing -> (\s -> if s == "d" then FdDirs else FdFiles) <$> envOr "_FZFX_FDTYPE" "f"
+        Nothing -> (\case "d" -> FdDirs; "f" -> FdFiles; "m" -> FdMixed; _ -> defaultFdType) <$> envOr "_FZFX_FDTYPE" ""
     hid <-
         if optHidden
             then pure True
@@ -1284,6 +1391,13 @@ mainLaunch RunOpts{..} = do
             pure $ case env of
                 "bottom" -> PrevBottom
                 _ -> PrevRight
+    heightRaw <- case optHeight of
+        Just h -> pure h
+        Nothing -> envOr "_FZFX_HEIGHT" "100%"
+    (height, minHeight) <-
+        if heightRaw == "auto"
+            then resolveAutoHeight
+            else pure (heightRaw, 0)
     q <-
         lookupEnv "_FZFX_QUERY" >>= \case
             Just v | not (null v) -> pure (T.pack v)
@@ -1302,7 +1416,7 @@ mainLaunch RunOpts{..} = do
     fSelEnv <- envOr "_FZFX_SAVED_FILE_SEL" ""
     dSelEnv <- envOr "_FZFX_SAVED_DIR_SEL" ""
     let sd = T.pack $ tmp </> "fzfx-" <> show pid
-        fq = if T.null fqEnv then (if fd == FdFiles then q else "") else fqEnv
+        fq = if T.null fqEnv then (if fd `elem` [FdFiles, FdMixed] then q else "") else fqEnv
         dq = if T.null dqEnv then (if fd == FdDirs then q else "") else dqEnv
         fSel = if T.null fSelEnv then [] else filter (not . T.null) (T.lines fSelEnv)
         dSel = if T.null dSelEnv then [] else filter (not . T.null) (T.lines dSelEnv)
@@ -1332,6 +1446,10 @@ mainLaunch RunOpts{..} = do
                 , cGitSt = gitSt
                 , cPreviewOn = previewOn
                 , cPreviewLayout = previewLayout
+                , cHeight = height
+                , cMinHeight = minHeight
+                , cPrompt = fromMaybe "" optPrompt
+                , cMixed = fd == FdMixed
                 }
 
     setCurrentDirectory (t cwd)

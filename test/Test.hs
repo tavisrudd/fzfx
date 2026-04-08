@@ -355,6 +355,10 @@ configRoundtripTests =
                     , cGitSt = False
                     , cPreviewOn = True
                     , cPreviewLayout = PrevRight
+                    , cHeight = "100%"
+                    , cMinHeight = 0
+                    , cPrompt = ""
+                    , cMixed = False
                     }
          in read (show cfg) == cfg
     , test "Config Read/Show roundtrip default-like" $
@@ -383,6 +387,10 @@ configRoundtripTests =
                     , cGitSt = False
                     , cPreviewOn = True
                     , cPreviewLayout = PrevRight
+                    , cHeight = "40%"
+                    , cMinHeight = 0
+                    , cPrompt = ""
+                    , cMixed = False
                     }
          in read (show cfg) == cfg
     ]
@@ -429,6 +437,10 @@ testCfg =
         , cGitSt = False
         , cPreviewOn = True
         , cPreviewLayout = PrevRight
+        , cHeight = "100%"
+        , cMinHeight = 0
+        , cPrompt = ""
+        , cMixed = False
         }
 
 hasAction :: FzfAction -> [FzfAction] -> Bool

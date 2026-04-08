@@ -7,6 +7,8 @@ module Fzfx.Core (
     SearchMode (..),
     GitStatus (..),
     FdType (..),
+    defaultFdType,
+    fdTypeEnv,
     PrevMode (..),
     PreviewLayout (..),
     OutMode (..),
@@ -80,8 +82,16 @@ data SearchMode
 data GitStatus = Unstaged | Staged | Untracked | Clean
     deriving (Eq, Ord, Show, Read)
 
-data FdType = FdFiles | FdDirs
+data FdType = FdFiles | FdDirs | FdMixed
     deriving (Eq, Read, Show)
+
+defaultFdType :: FdType
+defaultFdType = FdMixed
+
+fdTypeEnv :: FdType -> Text
+fdTypeEnv FdFiles = "f"
+fdTypeEnv FdDirs = "d"
+fdTypeEnv FdMixed = "m"
 
 data PrevMode = Content | Diff
     deriving (Eq, Read, Show)
@@ -186,6 +196,10 @@ data Config = Config
     , cGitSt :: !Bool -- git status filter (only dirty files)
     , cPreviewOn :: !Bool -- preview visible
     , cPreviewLayout :: !PreviewLayout -- preview position (right/bottom)
+    , cHeight :: !Text -- fzf --height value (e.g. "40%", "~100%")
+    , cMinHeight :: !Int -- fzf --min-height (0 = don't pass)
+    , cPrompt :: !Text -- custom prompt override (empty = default)
+    , cMixed :: !Bool -- mixed mode preference (files+dirs together)
     }
     deriving (Eq, Read, Show)
 
@@ -373,12 +387,21 @@ hdrText Config{..} =
             | cFd == FdDirs = "\n" <> dim ("cwd: " <> tilde cCwd)
             | cCwd == cOrig = ""
             | otherwise = "\n" <> dim ("cwd: " <> tilde cCwd <> "  (from " <> tilde cOrig <> ")")
+        typeIndicator
+            | cMixed =
+                "C-t "
+                    <> (if cFd == FdMixed then on "mixed" else off "mixed")
+                    <> "/"
+                    <> (if cFd == FdDirs then on "dirs" else off "dirs")
+            | otherwise =
+                "C-t "
+                    <> (if cFd == FdFiles then on "files" else off "files")
+                    <> "/"
+                    <> (if cFd == FdDirs then on "dirs" else off "dirs")
      in T.intercalate
             sep
-            [ "C-t "
-                <> (if cFd == FdFiles then on "files" else off "files")
-                <> "/"
-                <> (if cFd == FdDirs then on "dirs" else off "dirs")
+            [ typeIndicator
+            , "M-m " <> tog cMixed "mixed"
             , "M-h " <> tog cHid "hid"
             , "M-i " <> tog cIgn "ign"
             , "C-p " <> (if cPreviewLayout == PrevRight then off "→" else on "↓")
@@ -411,9 +434,11 @@ data ToggleName
     | TgNoIgnore
     | TgGitStatus
     | TgPreviewLayout
-    | TgType -- auto-toggles between files/dirs
+    | TgType -- auto-toggles between [files|mixed]/dirs
     | TgTypeD -- switch to dirs
     | TgTypeF -- switch to files
+    | TgTypeMixed -- switch to mixed (files+dirs)
+    | TgMixed -- toggle mixed mode on/off (M-m)
     deriving (Eq, Show)
 
 -- | FZF actions to emit (composed with +)
@@ -461,9 +486,11 @@ transition cfg (EvToggle TgGitStatus _) =
     let on = not (cGitSt cfg)
         cfg' = cfg{cGitSt = on, cPrev = if on then Diff else Content}
      in (cfg', [reloadAction cfg', RefreshPreview, ChangeFooter (hdrText cfg')])
--- Toggle: type auto (dispatch to D or F)
+-- Toggle: type auto (dispatch to D or F/Mixed)
 transition cfg (EvToggle TgType q) =
-    let target = if cFd cfg == FdFiles then TgTypeD else TgTypeF
+    let target = case cFd cfg of
+            FdDirs -> if cMixed cfg then TgTypeMixed else TgTypeF
+            _ -> TgTypeD
      in transition cfg (EvToggle target q)
 -- Toggle: switch to dirs mode
 transition cfg (EvToggle TgTypeD curQ)
@@ -485,7 +512,7 @@ transition cfg (EvToggle TgTypeF curQ)
     | cFd cfg == FdFiles = (cfg, []) -- already in files mode
     | otherwise =
         let restoreQ = cFileQuery cfg
-            cfg' = cfg{cFd = FdFiles, cDirQuery = curQ}
+            cfg' = cfg{cFd = FdFiles, cMixed = False, cDirQuery = curQ}
          in ( cfg'
             ,
                 [ reloadWithQuery cfg' restoreQ
@@ -494,6 +521,29 @@ transition cfg (EvToggle TgTypeF curQ)
                 , ChangeFooter (hdrText cfg')
                 ]
             )
+-- Toggle: switch to mixed mode (files+dirs)
+transition cfg (EvToggle TgTypeMixed curQ)
+    | cFd cfg == FdMixed = (cfg, []) -- already in mixed mode
+    | otherwise =
+        let restoreQ = cFileQuery cfg
+            cfg' = cfg{cFd = FdMixed, cMixed = True, cDirQuery = curQ}
+         in ( cfg'
+            ,
+                [ reloadWithQuery cfg' restoreQ
+                , ChangePrompt "mixed> "
+                , ChangeQuery restoreQ
+                , ChangeFooter (hdrText cfg')
+                ]
+            )
+-- Toggle: mixed mode on/off (M-m)
+transition cfg (EvToggle TgMixed curQ) =
+    case cFd cfg of
+        FdFiles -> transition cfg{cMixed = True} (EvToggle TgTypeMixed curQ)
+        FdMixed -> transition cfg{cMixed = False} (EvToggle TgTypeF curQ)
+        FdDirs ->
+            -- Just toggle the preference for when we switch back
+            let cfg' = cfg{cMixed = not (cMixed cfg)}
+             in (cfg', [ChangeFooter (hdrText cfg')])
 -- Transform: query changed — update prompt, search mode, reload
 transition cfg (EvTransform q) =
     let mode = parseQuery q
@@ -508,7 +558,7 @@ transition cfg (EvTransform q) =
                 , cFd = if autoSwitchFd then FdFiles else cFd cfg
                 }
         hdrUpd = [ChangeFooter (hdrText cfg') | autoSwitchFd]
-        promptName = case nFd of FdDirs -> "dirs"; FdFiles -> "files"
+        promptName = case nFd of FdDirs -> "dirs"; FdMixed -> "mixed"; FdFiles -> "files"
         act = case mode of
             FileMode
                 | wasRg -> [ChangePrompt (promptName <> "> "), EnableSearch, reloadAction cfg']
