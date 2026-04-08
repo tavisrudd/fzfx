@@ -186,7 +186,7 @@ reloadFiles Config{..} query = do
                 pfx <- T.strip <$> readProc "git" ["rev-parse", "--show-prefix"]
                 u <- Set.fromList . filter (not . T.null) . T.lines <$> readProc "git" ["diff", "--name-only"]
                 s <- Set.fromList . filter (not . T.null) . T.lines <$> readProc "git" ["diff", "--cached", "--name-only"]
-                tr <- Set.fromList . filter (not . T.null) . T.lines <$> readProc "git" ["ls-files", "--others", "--exclude-standard"]
+                tr <- Set.fromList . map (pfx <>) . filter (not . T.null) . T.lines <$> readProc "git" ["ls-files", "--others", "--exclude-standard"]
                 let classifyFile f =
                         let rp = pfx <> f
                          in case () of
@@ -1416,7 +1416,7 @@ mainLaunch RunOpts{..} = do
             pure $ case omEnv of
                 "stdout" -> OStdout
                 "tmux" -> OTmux
-                _ -> if T.null pane then OStdout else OTmux
+                _ -> OStdout
     at <-
         if optAtPrefix
             then pure True
