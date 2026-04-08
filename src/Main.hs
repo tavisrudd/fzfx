@@ -17,6 +17,7 @@ import Data.Text.IO qualified as TIO
 import Options.Applicative
 import Options.Applicative.Help.Pretty (pretty)
 import System.Directory (
+    canonicalizePath,
     createDirectoryIfMissing,
     doesDirectoryExist,
     doesFileExist,
@@ -67,6 +68,7 @@ dispatch sub rest = case sub of
     SPreviewWidth -> cmdPreviewWidth
     SZoxide -> cmdZoxide (toArg rest)
     STokei -> cmdTokei (toArg rest)
+    SHeightToggle -> cmdHeightToggle (toArg rest)
   where
     toArg = T.pack . unwords
 
@@ -878,11 +880,6 @@ cmdNavigate navAction sel query = do
         nQuery = if navAction == "into" && cFd == FdDirs then cFileQuery else baseQuery
         nFileQ = cFileQuery
         nDirQ = if navAction == "into" && cFd == FdDirs then query else cDirQuery
-    setEnv "_FZFX_CWD" (t nCwd')
-    setEnv "_FZFX_QUERY" (t nQuery)
-    setEnv "_FZFX_AT_PREFIX" (if cAt then "1" else "0")
-    setEnv "_FZFX_FDTYPE" (t $ fdTypeEnv nFd)
-    setEnv "_FZFX_HIDDEN" (if cHid then "--hidden" else "")
     -- Auto-disable git-status when navigating to a dir with no dirty files
     nGitSt <-
         if not cGitSt || T.null nGit
@@ -891,17 +888,8 @@ cmdNavigate navAction sel query = do
                 out <- readProcMaybe "git" ["-C", nCwd', "status", "--porcelain"]
                 pure $ maybe False (not . T.null . T.strip) out
     let nPrev = if cGitSt && not nGitSt then Content else cPrev
-    setEnv "_FZFX_GIT_STATUS" (if nGitSt then "1" else "0")
-    setEnv "_FZFX_PREV_MODE" (if nPrev == Diff then "diff" else "content")
-    setEnv "_FZFX_PREVIEW" (if cPreviewOn then "1" else "0")
-    setEnv "_FZFX_PREVIEW_LAYOUT" (case cPreviewLayout of PrevRight -> "right"; PrevBottom -> "bottom")
-    setEnv "_FZFX_HEIGHT" (t cHeight)
-    setEnv "_FZFX_FILE_QUERY" (t nFileQ)
-    setEnv "_FZFX_DIR_QUERY" (t nDirQ)
-    setEnv "_FZFX_SAVED_FILE_SEL" (t (T.intercalate "\n" cSavedFileSel))
-    setEnv "_FZFX_SAVED_DIR_SEL" (t (T.intercalate "\n" cSavedDirSel))
-    setEnv "_FZFX_STATE_DIR" ""
-    mainLaunch defaultRunOpts
+        cfg = Config{cCwd = nCwd', cQuery = nQuery, cFd = nFd, cGitSt = nGitSt, cPrev = nPrev, cFileQuery = nFileQ, cDirQuery = nDirQ, ..}
+    relaunch cfg
 
 cmdZoxide :: Text -> IO ()
 cmdZoxide _query = do
@@ -911,27 +899,72 @@ cmdZoxide _query = do
     case ec of
         ExitSuccess -> do
             let nCwd = T.strip (decodeOut out)
-            unless (T.null nCwd) $ do
-                setEnv "_FZFX_CWD" (t nCwd)
-                setEnv "_FZFX_QUERY" ""
-                setEnv "_FZFX_AT_PREFIX" (if cAt then "1" else "0")
-                setEnv "_FZFX_FDTYPE" (t $ fdTypeEnv defaultFdType)
-                setEnv "_FZFX_HIDDEN" (if cHid then "--hidden" else "")
-                setEnv "_FZFX_GIT_STATUS" (if cGitSt then "1" else "0")
-                setEnv "_FZFX_PREV_MODE" (if cPrev == Diff then "diff" else "content")
-                setEnv "_FZFX_PREVIEW" (if cPreviewOn then "1" else "0")
-                setEnv "_FZFX_PREVIEW_LAYOUT" (case cPreviewLayout of PrevRight -> "right"; PrevBottom -> "bottom")
-                setEnv "_FZFX_HEIGHT" (t cHeight)
-                setEnv "_FZFX_FILE_QUERY" ""
-                setEnv "_FZFX_DIR_QUERY" ""
-                setEnv "_FZFX_SAVED_FILE_SEL" ""
-                setEnv "_FZFX_SAVED_DIR_SEL" ""
-                setEnv "_FZFX_STATE_DIR" ""
-                mainLaunch defaultRunOpts
+            unless (T.null nCwd) $
+                relaunch Config{cCwd = nCwd, cQuery = "", cFd = defaultFdType, cFileQuery = "", cDirQuery = "", cSavedFileSel = [], cSavedDirSel = [], ..}
         _ -> pure ()
 
+{- | Set relaunch env vars from config and start a new fzf instance.
+Callers override specific fields via record update before passing.
+-}
+relaunch :: Config -> IO ()
+relaunch Config{..} = do
+    setEnv "_FZFX_CWD" (t cCwd)
+    setEnv "_FZFX_QUERY" (t cQuery)
+    setEnv "_FZFX_AT_PREFIX" (if cAt then "1" else "0")
+    setEnv "_FZFX_FDTYPE" (t $ fdTypeEnv cFd)
+    setEnv "_FZFX_HIDDEN" (if cHid then "--hidden" else "")
+    setEnv "_FZFX_NO_IGNORE" (if cIgn then "1" else "0")
+    setEnv "_FZFX_GIT_STATUS" (if cGitSt then "1" else "0")
+    setEnv "_FZFX_PREV_MODE" (if cPrev == Diff then "diff" else "content")
+    setEnv "_FZFX_PREVIEW" (if cPreviewOn then "1" else "0")
+    setEnv "_FZFX_PREVIEW_LAYOUT" (case cPreviewLayout of PrevRight -> "right"; PrevBottom -> "bottom")
+    setEnv "_FZFX_HEIGHT" (t cHeight)
+    setEnv "_FZFX_PROMPT" (t cPrompt)
+    setEnv "_FZFX_MIXED" (if cMixed then "1" else "0")
+    setEnv "_FZFX_FILE_QUERY" (t cFileQuery)
+    setEnv "_FZFX_DIR_QUERY" (t cDirQuery)
+    setEnv "_FZFX_SAVED_FILE_SEL" (t (T.intercalate "\n" cSavedFileSel))
+    setEnv "_FZFX_SAVED_DIR_SEL" (t (T.intercalate "\n" cSavedDirSel))
+    setEnv "_FZFX_STATE_DIR" ""
+    mainLaunch defaultRunOpts
+
+cmdHeightToggle :: Text -> IO ()
+cmdHeightToggle query = do
+    cfg@Config{..} <- loadConfig
+    relaunch cfg{cQuery = query, cHeight = if cHeightAuto then "100%" else "auto"}
+
 detectGit :: Text -> IO Text
-detectGit dir = fromMaybe "" <$> readProcMaybe "git" ["-C", dir, "rev-parse", "--show-toplevel"]
+detectGit dir = do
+    ignored <- isGitIgnored dir
+    if ignored
+        then pure ""
+        else fromMaybe "" <$> readProcMaybe "git" ["-C", dir, "rev-parse", "--show-toplevel"]
+
+{- | Check if dir (or any parent) is listed in ~/.fzfx-git-ignore.
+File format: one path per line, blanks and #-comments skipped, paths canonicalized.
+-}
+isGitIgnored :: Text -> IO Bool
+isGitIgnored dir = do
+    home <- fromMaybe "/tmp" <$> lookupEnv "HOME"
+    let ignorePath = home </> ".fzfx-git-ignore"
+    exists <- doesFileExist ignorePath
+    if not exists
+        then pure False
+        else do
+            content <- readFile' ignorePath
+            let paths =
+                    [ l
+                    | line <- lines content
+                    , let l = dropWhile (== ' ') line
+                    , not (null l)
+                    , head l /= '#'
+                    ]
+            canonPaths <- mapM (\p -> catch (canonicalizePath p) (\(_ :: IOException) -> pure p)) paths
+            canonDir <- catch (canonicalizePath (t dir)) (\(_ :: IOException) -> pure (t dir))
+            let parents = iterate takeDirectory canonDir
+                -- takeDirectory eventually fixpoints at "/"
+                unique = takeWhile (\d -> takeDirectory d /= d) parents ++ ["/"]
+            pure $ any (`elem` canonPaths) unique
 
 -- ═══════════════════════════════════════════════════════════════════════
 -- FZF Argument Building
@@ -1035,6 +1068,7 @@ fzfArgs cfg@Config{..} = baseOpts <> selfBindings <> staticBindings
         , xe cfg "ctrl-alt-l" SForgit "{}" ""
         , xe cfg "ctrl-alt-d" SDebug "" ""
         , xf cfg "ctrl-p" SToggle "preview_layout"
+        , bc cfg "ctrl-f" SHeightToggle "{q}"
         , xf cfg "alt-r" SSwap "{q}"
         ]
     staticBindings =
@@ -1373,6 +1407,7 @@ mainLaunch RunOpts{..} = do
         if optHidden
             then pure True
             else T.isInfixOf "--hidden" <$> envOr "_FZFX_HIDDEN" ""
+    ign <- (== "1") <$> envOr "_FZFX_NO_IGNORE" "0"
     gitSt <-
         if optGitStatus
             then pure True
@@ -1396,8 +1431,13 @@ mainLaunch RunOpts{..} = do
     heightRaw <- case optHeight of
         Just h -> pure h
         Nothing -> envOr "_FZFX_HEIGHT" "100%"
+    prompt <- case optPrompt of
+        Just p -> pure p
+        Nothing -> envOr "_FZFX_PROMPT" ""
+    mixed <- (== "1") <$> envOr "_FZFX_MIXED" "0"
+    let heightAuto = heightRaw == "auto"
     (height, minHeight) <-
-        if heightRaw == "auto"
+        if heightAuto
             then resolveAutoHeight
             else pure (heightRaw, 0)
     q <-
@@ -1436,7 +1476,7 @@ mainLaunch RunOpts{..} = do
                 , cAt = at'
                 , cFd = fd
                 , cHid = hid
-                , cIgn = False
+                , cIgn = ign
                 , cPrev = prevMode
                 , cFileQuery = fq
                 , cDirQuery = dq
@@ -1449,9 +1489,10 @@ mainLaunch RunOpts{..} = do
                 , cPreviewOn = previewOn
                 , cPreviewLayout = previewLayout
                 , cHeight = height
+                , cHeightAuto = heightAuto
                 , cMinHeight = minHeight
-                , cPrompt = fromMaybe "" optPrompt
-                , cMixed = fd == FdMixed
+                , cPrompt = prompt
+                , cMixed = mixed || fd == FdMixed
                 }
 
     setCurrentDirectory (t cwd)

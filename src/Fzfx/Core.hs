@@ -136,6 +136,7 @@ data Subcmd
     | SPreviewWidth
     | SZoxide
     | STokei
+    | SHeightToggle
     deriving (Eq, Enum, Bounded, Show)
 
 flg :: Subcmd -> Text
@@ -164,6 +165,7 @@ flg = \case
     SPreviewWidth -> "--preview-width"
     SZoxide -> "--zoxide"
     STokei -> "--tokei"
+    SHeightToggle -> "--height-toggle"
 
 parseSubcmd :: String -> Maybe Subcmd
 parseSubcmd s = lookup s [(T.unpack (flg c), c) | c <- [minBound .. maxBound]]
@@ -197,6 +199,7 @@ data Config = Config
     , cPreviewOn :: !Bool -- preview visible
     , cPreviewLayout :: !PreviewLayout -- preview position (right/bottom)
     , cHeight :: !Text -- fzf --height value (e.g. "40%", "~100%")
+    , cHeightAuto :: !Bool -- True when height was resolved from "auto"
     , cMinHeight :: !Int -- fzf --min-height (0 = don't pass)
     , cPrompt :: !Text -- custom prompt override (empty = default)
     , cMixed :: !Bool -- mixed mode preference (files+dirs together)
@@ -407,6 +410,7 @@ hdrText Config{..} =
             , "C-p " <> (if cPreviewLayout == PrevRight then off "→" else on "↓")
             , "M-g " <> tog cGitSt "git changed"
             , "C-M-g " <> (if cPrev == Diff then on "diff" else off "diff")
+            , "C-f " <> (if cHeightAuto then dim "auto" else dim "full")
             , "M-u/s/?"
             , "M-a " <> tog cAt "@"
             ]
