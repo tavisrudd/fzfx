@@ -352,6 +352,9 @@ configRoundtripTests =
                     , cWasRg = True
                     , cSavedFileSel = ["/home/user/proj/a.hs"]
                     , cSavedDirSel = []
+                    , cGitSt = False
+                    , cPreviewOn = True
+                    , cPreviewLayout = PrevRight
                     }
          in read (show cfg) == cfg
     , test "Config Read/Show roundtrip default-like" $
@@ -377,6 +380,9 @@ configRoundtripTests =
                     , cWasRg = False
                     , cSavedFileSel = []
                     , cSavedDirSel = []
+                    , cGitSt = False
+                    , cPreviewOn = True
+                    , cPreviewLayout = PrevRight
                     }
          in read (show cfg) == cfg
     ]
@@ -420,6 +426,9 @@ testCfg =
         , cWasRg = False
         , cSavedFileSel = []
         , cSavedDirSel = []
+        , cGitSt = False
+        , cPreviewOn = True
+        , cPreviewLayout = PrevRight
         }
 
 hasAction :: FzfAction -> [FzfAction] -> Bool
@@ -431,8 +440,11 @@ noAction a = not . hasAction a
 hasReload :: [FzfAction] -> Bool
 hasReload = any (\case ReloadSync{} -> True; _ -> False)
 
-hasHeader :: [FzfAction] -> Bool
-hasHeader = any (\case ChangeHeader{} -> True; _ -> False)
+hasFooter :: [FzfAction] -> Bool
+hasFooter = any (\case ChangeFooter{} -> True; _ -> False)
+
+hasPreviewWindow :: [FzfAction] -> Bool
+hasPreviewWindow = any (\case ChangePreviewWindow{} -> True; _ -> False)
 
 -- ═══════════════════════════════════════════════════════════════════════
 -- Transition: Toggles
@@ -450,7 +462,7 @@ transitionToggleTests =
          in not (cAt cfg')
     , test "toggle at_prefix: emits header, no reload" $
         let (_, acts) = transition testCfg (EvToggle TgAtPrefix "")
-         in hasHeader acts && not (hasReload acts)
+         in hasFooter acts && not (hasReload acts)
     , -- diff toggle
       test "toggle diff: Content → Diff" $
         let (cfg', _) = transition testCfg (EvToggle TgDiff "")
@@ -468,14 +480,14 @@ transitionToggleTests =
          in cHid cfg'
     , test "toggle hidden: emits reload + header" $
         let (_, acts) = transition testCfg (EvToggle TgHidden "")
-         in hasReload acts && hasHeader acts
+         in hasReload acts && hasFooter acts
     , -- no-ignore toggle
       test "toggle no_ignore: flips cIgn" $
         let (cfg', _) = transition testCfg (EvToggle TgNoIgnore "")
          in cIgn cfg'
     , test "toggle no_ignore: emits reload + header" $
         let (_, acts) = transition testCfg (EvToggle TgNoIgnore "")
-         in hasReload acts && hasHeader acts
+         in hasReload acts && hasFooter acts
     , -- type toggle: files → dirs
       test "toggle type: files → dirs" $
         let (cfg', _) = transition testCfg (EvToggle TgType "curquery")
@@ -516,6 +528,42 @@ transitionToggleTests =
         let cfg1 = testCfg{cFd = FdDirs}
             (cfg', acts) = transition cfg1 (EvToggle TgTypeD "q")
          in null acts && cFd cfg' == FdDirs
+    , -- git status toggle
+      test "toggle git_status: off → on, sets cGitSt" $
+        let (cfg', _) = transition testCfg (EvToggle TgGitStatus "")
+         in cGitSt cfg'
+    , test "toggle git_status: on → off, clears cGitSt" $
+        let cfg1 = testCfg{cGitSt = True, cPrev = Diff}
+            (cfg', _) = transition cfg1 (EvToggle TgGitStatus "")
+         in not (cGitSt cfg')
+    , test "toggle git_status: on → also enables diff preview" $
+        let (cfg', _) = transition testCfg (EvToggle TgGitStatus "")
+         in cPrev cfg' == Diff
+    , test "toggle git_status: off → also disables diff preview" $
+        let cfg1 = testCfg{cGitSt = True, cPrev = Diff}
+            (cfg', _) = transition cfg1 (EvToggle TgGitStatus "")
+         in cPrev cfg' == Content
+    , test "toggle git_status: emits reload + refresh-preview + footer" $
+        let (_, acts) = transition testCfg (EvToggle TgGitStatus "")
+         in hasReload acts && hasAction RefreshPreview acts && hasFooter acts
+    , -- preview layout toggle
+      test "toggle preview_layout: right → bottom" $
+        let (cfg', _) = transition testCfg (EvToggle TgPreviewLayout "")
+         in cPreviewLayout cfg' == PrevBottom
+    , test "toggle preview_layout: bottom → right" $
+        let cfg1 = testCfg{cPreviewLayout = PrevBottom}
+            (cfg', _) = transition cfg1 (EvToggle TgPreviewLayout "")
+         in cPreviewLayout cfg' == PrevRight
+    , test "toggle preview_layout: emits change-preview-window + reload + footer" $
+        let (_, acts) = transition testCfg (EvToggle TgPreviewLayout "")
+         in hasPreviewWindow acts && hasReload acts && hasFooter acts
+    , test "toggle preview_layout: right → emits bottom direction" $
+        let (_, acts) = transition testCfg (EvToggle TgPreviewLayout "")
+         in hasAction (ChangePreviewWindow "bottom:50%") acts
+    , test "toggle preview_layout: bottom → emits right direction" $
+        let cfg1 = testCfg{cPreviewLayout = PrevBottom}
+            (_, acts) = transition cfg1 (EvToggle TgPreviewLayout "")
+         in hasAction (ChangePreviewWindow "right:50%") acts
     ]
 
 -- ═══════════════════════════════════════════════════════════════════════
@@ -558,10 +606,10 @@ transitionTransformTests =
     , test "transform: auto-switches dirs→files on rg entry" $
         let cfg1 = testCfg{cFd = FdDirs}
             (cfg', acts) = transition cfg1 (EvTransform "#pattern")
-         in cFd cfg' == FdFiles && hasHeader acts
+         in cFd cfg' == FdFiles && hasFooter acts
     , test "transform: stays files on rg entry" $
         let (cfg', acts) = transition testCfg (EvTransform "#pattern")
-         in cFd cfg' == FdFiles && not (hasHeader acts)
+         in cFd cfg' == FdFiles && not (hasFooter acts)
     , test "transform: dirs prompt in dirs mode" $
         let cfg1 = testCfg{cFd = FdDirs}
             (_, acts) = transition cfg1 (EvTransform "hello")
@@ -705,4 +753,10 @@ renderActionsTests =
     , test "renderActions: reload-sync" $
         renderActions [ReloadSync "fzfx --reload {q}"]
             == "reload-sync(fzfx --reload {q})"
+    , test "renderActions: change-border-label" $
+        renderActions [ChangeFooter "status text"]
+            == "change-border-label(status text)"
+    , test "renderActions: change-preview-window" $
+        renderActions [ChangePreviewWindow "bottom:50%"]
+            == "change-preview-window(bottom:50%)"
     ]

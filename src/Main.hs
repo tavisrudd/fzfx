@@ -14,6 +14,8 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
+import Options.Applicative
+import Options.Applicative.Help.Pretty (pretty)
 import System.Directory (
     createDirectoryIfMissing,
     doesDirectoryExist,
@@ -26,10 +28,10 @@ import System.Directory (
     setCurrentDirectory,
  )
 import System.Environment (getArgs, getExecutablePath, lookupEnv, setEnv)
-import System.Exit (ExitCode (..), exitSuccess, exitWith)
+
 import System.FilePath (isAbsolute, pathSeparator, splitDirectories, takeDirectory, takeExtension, (</>))
 import System.FilePath qualified as FP
-import System.IO (IOMode (..), hClose, hFlush, openFile, readFile', stdout)
+import System.IO (hFlush, readFile', stdout)
 import System.Posix.IO (dupTo, stdError, stdInput, stdOutput)
 import System.Posix.Process (executeFile, getProcessID)
 import System.Process.Typed hiding (setEnv)
@@ -61,6 +63,9 @@ dispatch sub rest = case sub of
     SSelRestore -> cmdSelRestore
     SSmartEnter -> cmdSmartEnter (toArg rest)
     SExtraArgs -> cmdExtraArgs (toArg rest)
+    SPreviewWidth -> cmdPreviewWidth
+    SZoxide -> cmdZoxide (toArg rest)
+    STokei -> cmdTokei (toArg rest)
   where
     toArg = T.pack . unwords
 
@@ -136,7 +141,7 @@ envOrM k m =
 -- ═══════════════════════════════════════════════════════════════════════
 
 cmdReload :: Text -> IO ()
-cmdReload q = withCfg $ \cfg@Config{..} ->
+cmdReload q = withCfg $ \cfg ->
     case parseQuery q of
         FileMode -> reloadFiles cfg q
         RgLive p ex -> reloadRgLive p ex
@@ -174,7 +179,7 @@ reloadFiles Config{..} query = do
                 u <- Set.fromList . filter (not . T.null) . T.lines <$> readProc "git" ["diff", "--name-only"]
                 s <- Set.fromList . filter (not . T.null) . T.lines <$> readProc "git" ["diff", "--cached", "--name-only"]
                 tr <- Set.fromList . filter (not . T.null) . T.lines <$> readProc "git" ["ls-files", "--others", "--exclude-standard"]
-                let classify f =
+                let classifyFile f =
                         let rp = pfx <> f
                          in case () of
                                 _
@@ -182,10 +187,29 @@ reloadFiles Config{..} query = do
                                     | Set.member rp s -> Staged
                                     | Set.member rp tr -> Untracked
                                     | otherwise -> Clean
+                    anyUnder st dir' =
+                        let d = T.dropWhileEnd (== '/') dir'
+                            dp = pfx <> d <> "/"
+                         in any (dp `T.isPrefixOf`) (Set.toList st)
+                    classifyDir d =
+                        case () of
+                            _
+                                | anyUnder u d -> Unstaged
+                                | anyUnder s d -> Staged
+                                | anyUnder tr d -> Untracked
+                                | otherwise -> Clean
+                    classify f = if cFd == FdDirs then classifyDir f else classifyFile f
                 pure [(classify f, f) | f <- files]
-    let ok = filter (\(st, _) -> maybe True (== st) sf) labeled
+    let statusOk = filter (\(st, _) -> maybe True (== st) sf) labeled
+        ok = if cGitSt then filter (\(st, _) -> st /= Clean) statusOk else statusOk
         (top, bot) = partition (\(_, f) -> "src/" `T.isPrefixOf` f) ok
-        final = top <> bot
+        dotEntry
+            | cFd /= FdDirs = []
+            | any (\(st, _) -> st == Unstaged) labeled = [(Unstaged, ".")]
+            | any (\(st, _) -> st == Staged) labeled = [(Staged, ".")]
+            | any (\(st, _) -> st == Untracked) labeled = [(Untracked, ".")]
+            | otherwise = [(Clean, ".")]
+        final = dotEntry <> top <> bot
         -- Compute positions of saved selections for restore
         savedSel = case cFd of
             FdFiles -> Set.fromList cSavedFileSel
@@ -200,6 +224,10 @@ reloadFiles Config{..} query = do
         case cFd of
             FdFiles -> void $ modConfig $ \x -> x{cSavedFileSel = []}
             FdDirs -> void $ modConfig $ \x -> x{cSavedDirSel = []}
+    -- Write stats for preview sizing
+    let maxW = if null final then 0 else maximum [T.length f + 2 | (_, f) <- final]
+    writeFile (t cDir </> "max-width") (show maxW)
+    writeFile (t cDir </> "line-count") (show (length final))
     mapM_ (\(st, f) -> TIO.putStrLn (gitStatusChar st <> "\t" <> f)) final
     hFlush stdout
 
@@ -303,22 +331,26 @@ showSymlink path = do
 
 cmdPreview :: Text -> IO ()
 cmdPreview line = withCfg $ \Config{..} -> do
-    cols <- maybe 80 readInt <$> lookupEnv "FZF_PREVIEW_COLUMNS"
     rows <- maybe 40 readInt <$> lookupEnv "FZF_PREVIEW_LINES"
     if T.null (T.strip line)
-        then contentPrev "."
+        then contentPrev (not (T.null cGit)) "."
         else case parseLine line of
             RgLine file ln -> do
                 showSymlink file
                 let start = max 1 (ln - rows `div` 2)
                 exec "bat" ["--color=always", "--style=numbers", "--highlight-line", showT ln, "--line-range", showT start <> ":", "--", file]
             FdLine st path
-                | cPrev == Diff, st /= Clean -> diffPrev st path cols
+                | cPrev == Diff
+                , st == Unstaged || st == Staged -> do
+                    isDir <- doesDirectoryExist (t path)
+                    if isDir
+                        then diffPrevDir path
+                        else diffPrev st path
                 | otherwise -> do
                     showSymlink path
-                    contentPrev path
+                    contentPrev (not (T.null cGit)) path
   where
-    readInt s = case reads s of [(n, _)] -> n; _ -> 80 :: Int
+    readInt s = case reads s of [(n, _)] -> n; _ -> 40 :: Int
 
 diffArgs :: GitStatus -> Text -> [Text]
 diffArgs st path = case st of
@@ -327,21 +359,29 @@ diffArgs st path = case st of
     Untracked -> ["diff", "--no-index", "--", "/dev/null", path]
     Clean -> []
 
-diffPrev :: GitStatus -> Text -> Int -> IO ()
-diffPrev st path cols = do
+diffPrevDir :: Text -> IO ()
+diffPrevDir path = do
+    let args = if path == "." then ["diff"] else ["diff", "--", path]
+    piped ("git", args) ("delta", [])
+
+diffPrev :: GitStatus -> Text -> IO ()
+diffPrev st path = do
     let da = diffArgs st path
     if null da
-        then contentPrev path
-        else
-            if cols >= 50
-                then piped ("git", da) ("delta", ["--width=" <> showT cols])
-                else exec "git" (da <> ["--color=always"])
+        then contentPrev True path
+        else piped ("git", da) ("delta", [])
 
-contentPrev :: Text -> IO ()
-contentPrev path = do
+contentPrev :: Bool -> Text -> IO ()
+contentPrev inGit path = do
     isDir <- doesDirectoryExist (t path)
     if isDir
-        then exec "eza" ["--icons", "--git-ignore", "--git", "--tree", "-L", "3", "--color=always", path]
+        then do
+            p <- if path == "." then T.pack <$> getCurrentDirectory else pure path
+            let gitArgs =
+                    if inGit
+                        then ["-l", "--no-permissions", "--no-filesize", "--no-user", "--no-time", "--git"]
+                        else []
+            exec "eza" (["--icons", "--git-ignore", "--tree", "-L", "3", "--color=always"] <> gitArgs <> [p])
         else
             if takeExtension (t path) == ".ipynb"
                 then exec "nbpreview" [path]
@@ -365,7 +405,14 @@ cmdFullPreview line = withCfg $ \Config{..} -> do
                 else do
                     isDir <- doesDirectoryExist (t path)
                     if isDir
-                        then exec "eza" ["--icons", "--git-ignore", "--git", "--tree", "-L", "3", "--color=always", path]
+                        then do
+                            p <- if path == "." then T.pack <$> getCurrentDirectory else pure path
+                            let inGit = not (T.null cGit)
+                                gitArgs =
+                                    if inGit
+                                        then ["-l", "--no-permissions", "--no-filesize", "--no-user", "--no-time", "--git"]
+                                        else []
+                            piped ("eza", ["--icons", "--git-ignore", "--tree", "-L", "3", "--color=always"] <> gitArgs <> [p]) ("less", ["-Rc~", "--lesskey-src=" <> T.pack lkFile])
                         else exec "bat" ["--color=always", "--style=plain", "--paging=always", "--pager", T.pack pager, "--", path]
 
 queryStackDir :: IO FilePath
@@ -528,18 +575,57 @@ reopenTty = do
     _ <- dupTo stdError stdInput
     void $ dupTo stdError stdOutput
 
+cmdPreviewWidth :: IO ()
+cmdPreviewWidth = withCfg $ \Config{..} -> do
+    let widthFile = t cDir </> "max-width"
+    exists <- doesFileExist widthFile
+    when exists $ do
+        content <- readFile' widthFile
+        let maxW = case reads content of [(n, _)] -> n; _ -> 0 :: Int
+            readInt' s = case reads s of [(n, _)] -> n; _ -> 0 :: Int
+        case cPreviewLayout of
+            PrevRight -> do
+                fzfCols <- lookupEnv "FZF_COLUMNS"
+                stdCols <- lookupEnv "COLUMNS"
+                let termW = case fzfCols of
+                        Just s | readInt' s > 0 -> readInt' s
+                        _ -> case stdCols of
+                            Just s | readInt' s > 0 -> readInt' s
+                            _ -> 120
+                    listNeed = maxW + 4
+                    prevPct = max 50 (((termW - listNeed) * 100) `div` termW)
+                TIO.putStr $ "change-preview-window(right:" <> showT prevPct <> "%)"
+            PrevBottom -> do
+                let lcFile = t cDir </> "line-count"
+                lcExists <- doesFileExist lcFile
+                when lcExists $ do
+                    lcContent <- readFile' lcFile
+                    let lineCount = case reads lcContent of [(n, _)] -> n; _ -> 0 :: Int
+                    fzfLines <- lookupEnv "FZF_LINES"
+                    stdLines <- lookupEnv "LINES"
+                    let termH = case fzfLines of
+                            Just s | readInt' s > 0 -> readInt' s
+                            _ -> case stdLines of
+                                Just s | readInt' s > 0 -> readInt' s
+                                _ -> 40
+                        -- File list needs: results + header (~3 lines) + prompt
+                        listNeed = lineCount + 4
+                        prevPct = max 50 (((termH - listNeed) * 100) `div` termH)
+                    TIO.putStr $ "change-preview-window(bottom:" <> showT prevPct <> "%)"
+    hFlush stdout
+
 cmdDebug :: IO ()
 cmdDebug = withCfg $ \cfg -> do
     reopenTty
     let args = fzfArgs cfg
         self = cSelf cfg
-        short = "fzfx"
-        content = T.unlines $ toggleSummary cfg <> ["", "# fzfArgs  (fzfx=" <> self <> ")", ""] <> map (formatArg self short) args <> ["", "# config", ""] <> prettyConfig cfg
+        abbrev = "fzfx"
+        content = T.unlines $ toggleSummary cfg <> ["", "# fzfArgs  (fzfx=" <> self <> ")", ""] <> map (formatArg self abbrev) args <> ["", "# config", ""] <> prettyConfig cfg
     runProcess_ $
         setStdin (byteStringInput (LBS.fromStrict (TE.encodeUtf8 content))) $
             proc "less" ["-R"]
   where
-    formatArg self short a = case T.breakOn "=" (T.replace self short a) of
+    formatArg self abbrev a = case T.breakOn "=" (T.replace self abbrev a) of
         (key, val)
             | "--bind" `T.isPrefixOf` key ->
                 let (bkey, bval) = T.breakOn ":" (T.drop 1 val)
@@ -551,8 +637,6 @@ cmdDebug = withCfg $ \cfg -> do
     toggleSummary Config{..} =
         let on label = "\ESC[1;32m" <> label <> "\ESC[0m"
             off label = "\ESC[2m" <> label <> "\ESC[0m"
-            tog True = on
-            tog False = off
          in [ "# toggles"
             , ""
             , "  " <> bold "M-a" <> "  @ prefix    " <> if cAt then on "ON" else off "off"
@@ -624,6 +708,16 @@ cmdForgit :: Text -> IO ()
 cmdForgit line = withCfg $ \_ ->
     exec "git-forgit" ["log", "--", lineFile (parseLine line)]
 
+cmdTokei :: Text -> IO ()
+cmdTokei line = withCfg $ \Config{..} -> do
+    reopenTty
+    let dir = case parseLine line of
+            FdLine _ p ->
+                let fp = t cCwd </> t p
+                 in T.pack $ takeDirectory fp
+            RgLine f _ -> T.pack $ takeDirectory (t f)
+    piped ("tokei", [dir]) ("less", ["-R"])
+
 cmdCopy :: Text -> IO ()
 cmdCopy line = do
     let path = T.stripEnd $ lineFile (parseLine line)
@@ -648,6 +742,8 @@ cmdToggle nameAndArgs = do
             "diff" -> TgDiff
             "hidden" -> TgHidden
             "no_ignore" -> TgNoIgnore
+            "git_status" -> TgGitStatus
+            "preview_layout" -> TgPreviewLayout
             "type_toggle" -> TgType
             "type_d" -> TgTypeD
             "type_f" -> TgTypeF
@@ -721,12 +817,50 @@ cmdNavigate navAction sel query = do
     setEnv "_FZFX_AT_PREFIX" (if cAt then "1" else "0")
     setEnv "_FZFX_FDTYPE" (case nFd of FdFiles -> "f"; FdDirs -> "d")
     setEnv "_FZFX_HIDDEN" (if cHid then "--hidden" else "")
+    -- Auto-disable git-status when navigating to a dir with no dirty files
+    nGitSt <-
+        if not cGitSt || T.null nGit
+            then pure False
+            else do
+                out <- readProcMaybe "git" ["-C", nCwd', "status", "--porcelain"]
+                pure $ maybe False (not . T.null . T.strip) out
+    let nPrev = if cGitSt && not nGitSt then Content else cPrev
+    setEnv "_FZFX_GIT_STATUS" (if nGitSt then "1" else "0")
+    setEnv "_FZFX_PREV_MODE" (if nPrev == Diff then "diff" else "content")
+    setEnv "_FZFX_PREVIEW" (if cPreviewOn then "1" else "0")
+    setEnv "_FZFX_PREVIEW_LAYOUT" (case cPreviewLayout of PrevRight -> "right"; PrevBottom -> "bottom")
     setEnv "_FZFX_FILE_QUERY" (t nFileQ)
     setEnv "_FZFX_DIR_QUERY" (t nDirQ)
     setEnv "_FZFX_SAVED_FILE_SEL" (t (T.intercalate "\n" cSavedFileSel))
     setEnv "_FZFX_SAVED_DIR_SEL" (t (T.intercalate "\n" cSavedDirSel))
     setEnv "_FZFX_STATE_DIR" ""
-    mainLaunch []
+    mainLaunch defaultRunOpts
+
+cmdZoxide :: Text -> IO ()
+cmdZoxide _query = do
+    Config{..} <- loadConfig
+    reopenTty
+    (ec, out, _) <- readProcess $ proc "zoxide" ["query", "--interactive"]
+    case ec of
+        ExitSuccess -> do
+            let nCwd = T.strip (decodeOut out)
+            unless (T.null nCwd) $ do
+                setEnv "_FZFX_CWD" (t nCwd)
+                setEnv "_FZFX_QUERY" ""
+                setEnv "_FZFX_AT_PREFIX" (if cAt then "1" else "0")
+                setEnv "_FZFX_FDTYPE" (case cFd of FdFiles -> "f"; FdDirs -> "d")
+                setEnv "_FZFX_HIDDEN" (if cHid then "--hidden" else "")
+                setEnv "_FZFX_GIT_STATUS" (if cGitSt then "1" else "0")
+                setEnv "_FZFX_PREV_MODE" (if cPrev == Diff then "diff" else "content")
+                setEnv "_FZFX_PREVIEW" (if cPreviewOn then "1" else "0")
+                setEnv "_FZFX_PREVIEW_LAYOUT" (case cPreviewLayout of PrevRight -> "right"; PrevBottom -> "bottom")
+                setEnv "_FZFX_FILE_QUERY" ""
+                setEnv "_FZFX_DIR_QUERY" ""
+                setEnv "_FZFX_SAVED_FILE_SEL" ""
+                setEnv "_FZFX_SAVED_DIR_SEL" ""
+                setEnv "_FZFX_STATE_DIR" ""
+                mainLaunch defaultRunOpts
+        _ -> pure ()
 
 detectGit :: Text -> IO Text
 detectGit dir = fromMaybe "" <$> readProcMaybe "git" ["-C", dir, "rev-parse", "--show-toplevel"]
@@ -792,35 +926,43 @@ fzfArgs cfg@Config{..} = baseOpts <> selfBindings <> staticBindings
         , "--tabstop=4"
         , "--with-nth=1,2"
         , "--id-nth=2"
-        , "--header=" <> hdrText cfg
+        , "--border=bottom"
+        , "--border-label=" <> hdrText cfg
+        , "--border-label-pos=bottom"
         , "--prompt=" <> (if cFd == FdDirs then "dirs" else "files") <> "> "
         , "--query=" <> cQuery
         , "--preview=" <> cSelf <> " " <> flg SPreview <> " {}"
-        , "--preview-window=right:50%"
+        , "--preview-window="
+            <> (case cPreviewLayout of PrevRight -> "right"; PrevBottom -> "bottom")
+            <> ":50%"
+            <> (if cPreviewOn then "" else ":hidden")
         ]
     selfBindings =
         [ xf cfg "change" STransform "{q}"
         , xf cfg "alt-a" SToggle "at_prefix"
         , xe cfg "alt-/" SFullPreview "{}" ""
-        , xf cfg "alt-g" SToggle "diff"
+        , xf cfg "alt-g" SToggle "git_status"
         , bind "alt-u" (statusToggle "U")
         , bind "alt-s" (statusToggle "S")
         , bind "alt-?" (statusToggle "?")
         , xf cfg "alt-h" SToggle "hidden"
         , xf cfg "alt-i" SToggle "no_ignore"
-        , bind "ctrl-/" (selSavePrefix cfg <> "transform:" <> cSelf <> " " <> flg SToggle <> " type_toggle {q}")
+        , bind "ctrl-t" (selSavePrefix cfg <> "transform:" <> cSelf <> " " <> flg SToggle <> " type_toggle {q}")
         , bc cfg "ctrl-o" SNavigate "into {} {q}"
         , bc cfg "alt-o" SNavigate "into_top {} {q}"
         , bc cfg "alt-l" SNavigate "into_top {} {q}"
         , bc cfg "ctrl-l" SNavigate "up {} {q}"
         , bc cfg "ctrl-r" SNavigate "root {} {q}"
         , bc cfg "alt-." SNavigate "toggle_root {} {q}"
+        , bc cfg "alt-z" SZoxide "{q}"
         , bind "enter" (selSavePrefix cfg <> "transform:" <> cSelf <> " " <> flg SSmartEnter)
         , bind "alt-enter" (selSavePrefix cfg <> "transform:" <> cSelf <> " " <> flg SSmartEnter <> " --alt")
+        , xe cfg "alt-t" STokei "{}" ""
         , xe cfg "alt-," SMagit "{}" "+abort"
         , xe cfg "alt-c" SCopy "{}" "+abort"
         , xe cfg "ctrl-alt-l" SForgit "{}" ""
         , xe cfg "ctrl-alt-d" SDebug "" ""
+        , xf cfg "ctrl-p" SToggle "preview_layout"
         , xf cfg "alt-r" SSwap "{q}"
         ]
     staticBindings =
@@ -838,13 +980,13 @@ fzfArgs cfg@Config{..} = baseOpts <> selfBindings <> staticBindings
         , bind "alt-}" "preview-half-page-down"
         , bind "alt-space" "preview-page-down"
         , bind "ctrl-space" "preview-page-up"
-        , bind "ctrl-alt-g" "preview-top"
-        , bind "ctrl-alt-G" "preview-bottom"
+        , xf cfg "ctrl-alt-g" SToggle "diff"
         , bind "ctrl-g" "abort"
         , bind "ctrl-z" "abort"
         , xf cfg "f4" SQueryPush "{q}"
         , xe cfg "f3" SQueryPop "" ("+transform:" <> cSelf <> " " <> flg SQueryApply)
         , bind "zero" ("preview(" <> cSelf <> " " <> flg SPreview <> ")")
+        , bind "result" ("transform:" <> cSelf <> " " <> flg SPreviewWidth)
         , bind "load" ("transform:" <> cSelf <> " " <> flg SSelRestore)
         ]
 
@@ -882,110 +1024,270 @@ outputResults Config{..} sel = do
 -- Main / Launch
 -- ═══════════════════════════════════════════════════════════════════════
 
+-- ── CLI options ──────────────────────────────────────────────────────
+
+data RunOpts = RunOpts
+    { optCwd :: !(Maybe Text)
+    , optOutput :: !(Maybe OutMode)
+    , optType :: !(Maybe FdType)
+    , optHidden :: !Bool
+    , optAtPrefix :: !Bool
+    , optGitStatus :: !Bool
+    , optPreview :: !(Maybe Bool)
+    , optPreviewLayout :: !(Maybe PreviewLayout)
+    , optPane :: !(Maybe Text)
+    , optQuery :: ![Text]
+    }
+
+-- | All-default opts for internal re-launch (state comes from env vars)
+defaultRunOpts :: RunOpts
+defaultRunOpts = RunOpts Nothing Nothing Nothing False False False Nothing Nothing Nothing []
+
+parseOutMode :: ReadM OutMode
+parseOutMode = eitherReader $ \case
+    "stdout" -> Right OStdout
+    "tmux" -> Right OTmux
+    s -> Left $ "unknown output mode: " <> s <> " (expected stdout|tmux)"
+
+parsePreviewLayout :: ReadM PreviewLayout
+parsePreviewLayout = eitherReader $ \case
+    "right" -> Right PrevRight
+    "bottom" -> Right PrevBottom
+    s -> Left $ "unknown layout: " <> s <> " (expected right|bottom)"
+
+parseFdType :: ReadM FdType
+parseFdType = eitherReader $ \case
+    "f" -> Right FdFiles
+    "d" -> Right FdDirs
+    "files" -> Right FdFiles
+    "dirs" -> Right FdDirs
+    s -> Left $ "unknown type: " <> s <> " (expected f|d|files|dirs)"
+
+runOptsParser :: Parser RunOpts
+runOptsParser =
+    RunOpts
+        <$> optional
+            ( T.pack
+                <$> strOption
+                    ( long "cwd"
+                        <> short 'C'
+                        <> metavar "DIR"
+                        <> help "Starting directory"
+                    )
+            )
+        <*> optional
+            ( option
+                parseOutMode
+                ( long "output"
+                    <> short 'o'
+                    <> metavar "MODE"
+                    <> help "Output mode (stdout|tmux)"
+                )
+            )
+        <*> optional
+            ( option
+                parseFdType
+                ( long "type"
+                    <> short 't'
+                    <> metavar "TYPE"
+                    <> help "File type filter (f|d|files|dirs)"
+                )
+            )
+        <*> switch
+            ( long "hidden"
+                <> short 'H'
+                <> help "Show hidden files"
+            )
+        <*> switch
+            ( long "at-prefix"
+                <> help "Prefix output with @"
+            )
+        <*> switch
+            ( long "git-status"
+                <> short 'g'
+                <> help "Only show files with git status (dirty files)"
+            )
+        <*> optional
+            ( flag' True (long "preview" <> help "Enable preview (default)")
+                <|> flag' False (long "no-preview" <> help "Disable preview")
+            )
+        <*> optional
+            ( option
+                parsePreviewLayout
+                ( long "preview-layout"
+                    <> metavar "LAYOUT"
+                    <> help "Preview position (right|bottom)"
+                )
+            )
+        <*> optional
+            ( T.pack
+                <$> strOption
+                    ( long "pane"
+                        <> short 'p'
+                        <> metavar "PANE"
+                        <> help "Tmux target pane"
+                    )
+            )
+        <*> many
+            ( T.pack
+                <$> strArgument
+                    ( metavar "QUERY..."
+                        <> help "Initial search query"
+                    )
+            )
+
+keybindingsHelp :: String
+keybindingsHelp =
+    unlines
+        [ "Keybindings:"
+        , "  enter           select file(s) and output/insert"
+        , "  alt-enter       open in editor (tr-edit)"
+        , "  tab             toggle selection down"
+        , "  shift-tab       toggle + clear line"
+        , "  alt-3           switch to ripgrep mode"
+        , "  alt-a           toggle @ prefix on output"
+        , "  alt-r           swap query/results"
+        , "  alt-/           full-screen preview in less"
+        , "  alt-g           toggle git status filter"
+        , "  ctrl-alt-g      toggle diff preview"
+        , "  alt-t           tokei stats for selection dir"
+        , "  alt-c           copy path to tmux buffer"
+        , "  alt-,           magit file status"
+        , "  ctrl-alt-l      forgit log"
+        , "  ctrl-o          navigate into directory"
+        , "  alt-o/l         navigate into directory (top)"
+        , "  ctrl-l          navigate up"
+        , "  ctrl-r          navigate to git root"
+        , "  alt-.           go to original directory"
+        , "  alt-z           zoxide jump (interactive)"
+        , "  alt-h           show/hide hidden files"
+        , "  alt-i           toggle no-ignore"
+        , "  alt--           extra args for fd/rg"
+        , "  ctrl-t          toggle files/dirs"
+        , "  alt-u/s/?       filter by git status"
+        , "  ctrl-p          toggle preview layout (right/bottom)"
+        , "  alt-p           toggle preview"
+        , "  alt-;           cycle preview layout"
+        , "  alt-{/}         preview half-page up/down"
+        , "  alt-space       preview page down"
+        , "  ctrl-space      preview page up"
+        , "  f4              push query to stack"
+        , "  f3              browse/restore query stack"
+        , "  alt-k           clear query"
+        , "  ctrl-k          kill line"
+        , "  alt-b/f         backward/forward word"
+        , "  ctrl-g/z        abort"
+        , ""
+        , "Query syntax:"
+        , "  <text>          file search (fd)"
+        , "  #<pattern>      live ripgrep search"
+        , "  #<pat>#<filter> ripgrep then filter results"
+        , "  \\#<text>        literal # in file search"
+        , ""
+        , "Environment (overridden by flags):"
+        , "  _FZFX_CWD         starting directory        (--cwd)"
+        , "  _FZFX_OUTPUT_MODE output mode               (--output)"
+        , "  _FZFX_FDTYPE      file type filter           (--type)"
+        , "  _FZFX_HIDDEN      show hidden files          (--hidden)"
+        , "  _FZFX_PANE        tmux target pane           (--pane)"
+        , "  _FZFX_ORIG_CWD    original cwd (toggle_root)"
+        , "  _FZFX_QUERY       initial query"
+        , "  _FZFX_AT_PREFIX   @ prefix (0/1)            (--at-prefix)"
+        , "  _FZFX_GIT_STATUS  git status filter (0/1)   (--git-status)"
+        , "  _FZFX_PREVIEW      preview on/off (0/1)     (--preview/--no-preview)"
+        , "  _FZFX_PREVIEW_LAYOUT  preview position       (--preview-layout)"
+        , ""
+        , "Internal (set automatically during re-launch):"
+        , "  _FZFX_STATE_DIR      temp state directory"
+        , "  _FZFX_FILE_QUERY     saved file-mode query"
+        , "  _FZFX_DIR_QUERY      saved dir-mode query"
+        , "  _FZFX_SAVED_FILE_SEL saved file selections"
+        , "  _FZFX_SAVED_DIR_SEL  saved dir selections"
+        , "  ctrl-alt-d           debug info"
+        ]
+
+optsInfo :: ParserInfo RunOpts
+optsInfo =
+    info
+        (runOptsParser <**> helper)
+        ( fullDesc
+            <> progDesc "FZF file picker with ripgrep integration"
+            <> header "fzfx - FZF file picker with ripgrep integration"
+            <> footerDoc (Just (pretty keybindingsHelp))
+        )
+
+-- ── Main ─────────────────────────────────────────────────────────────
+
 main :: IO ()
-main =
-    getArgs >>= \case
+main = do
+    args <- getArgs
+    case args of
         (cmd : rest) | Just sub <- parseSubcmd cmd -> dispatch sub rest
-        ["-h"] -> printHelp
-        ["--help"] -> printHelp
-        other -> mainLaunch (map T.pack other)
+        _ -> mainLaunch =<< execParser optsInfo
 
-printHelp :: IO ()
-printHelp =
-    TIO.putStr $
-        T.unlines
-            [ "fzfx - FZF file picker with ripgrep integration"
-            , ""
-            , "Usage: fzfx [query]"
-            , ""
-            , "Query syntax:"
-            , "  <text>          file search (fd)"
-            , "  #<pattern>      live ripgrep search"
-            , "  #<pat>#<filter> ripgrep then filter results"
-            , "  \\#<text>        literal # in file search"
-            , ""
-            , "Keybindings:"
-            , "  enter           select file(s) and output/insert"
-            , "  alt-enter       open in editor (tr-edit)"
-            , "  tab             toggle selection down"
-            , "  shift-tab       toggle + clear line"
-            , "  alt-3           switch to ripgrep mode"
-            , "  alt-a           toggle @ prefix on output"
-            , "  alt-r           swap query/results"
-            , "  alt-/           full-screen preview in less"
-            , "  alt-g           toggle diff preview"
-            , "  alt-c           copy path to tmux buffer"
-            , "  alt-,           magit file status"
-            , "  ctrl-alt-l      forgit log"
-            , "  ctrl-o          navigate into directory"
-            , "  alt-o/l         navigate into directory (top)"
-            , "  ctrl-l          navigate up"
-            , "  ctrl-r          navigate to git root"
-            , "  alt-.           go to original directory"
-            , "  alt-h           show/hide hidden files"
-            , "  alt-i           toggle no-ignore"
-            , "  alt--           extra args for fd/rg"
-            , "  ctrl-/          toggle files/dirs"
-            , "  alt-u/s/?       filter by git status"
-            , "  alt-p           toggle preview"
-            , "  alt-;           cycle preview layout"
-            , "  alt-{/}         preview half-page up/down"
-            , "  alt-space       preview page down"
-            , "  ctrl-space      preview page up"
-            , "  f4              push query to stack"
-            , "  f3              browse/restore query stack"
-            , "  alt-k           clear query"
-            , "  ctrl-k          kill line"
-            , "  alt-b/f         backward/forward word"
-            , "  ctrl-g/z        abort"
-            , ""
-            , "Environment:"
-            , "  _FZFX_CWD         starting directory"
-            , "  _FZFX_OUTPUT_MODE stdout or tmux (default: tmux if in tmux)"
-            , "  _FZFX_FDTYPE      fd type filter (f/d, default: f)"
-            , "  _FZFX_HIDDEN      set to --hidden to show hidden files"
-            , "  _FZFX_PANE        tmux target pane (fallback: TMUX_TARGET_PANE)"
-            , "  _FZFX_ORIG_CWD    original cwd (for toggle_root)"
-            , "  _FZFX_QUERY       initial query"
-            , "  _FZFX_AT_PREFIX   start with @ prefix (0/1, default: 0)"
-            , ""
-            , "Internal (set automatically during re-launch):"
-            , "  _FZFX_STATE_DIR      temp state directory"
-            , "  _FZFX_FILE_QUERY     saved file-mode query"
-            , "  _FZFX_DIR_QUERY      saved dir-mode query"
-            , "  _FZFX_SAVED_FILE_SEL saved file selections"
-            , "  _FZFX_SAVED_DIR_SEL  saved dir selections"
-            , "  ctrl-alt-d           debug info"
-            ]
-
-mainLaunch :: [Text] -> IO ()
-mainLaunch rest = do
+mainLaunch :: RunOpts -> IO ()
+mainLaunch RunOpts{..} = do
     self <- T.pack <$> getExecutablePath
-    cwd <- envOrM "_FZFX_CWD" (T.pack <$> getCurrentDirectory)
+    cwd <- case optCwd of
+        Just d -> pure d
+        Nothing -> envOrM "_FZFX_CWD" (T.pack <$> getCurrentDirectory)
     orig <- envOr "_FZFX_ORIG_CWD" cwd
-    omEnv <- envOr "_FZFX_OUTPUT_MODE" ""
     inTmux <- maybe False (not . null) <$> lookupEnv "TMUX"
-    pane <-
-        if not inTmux
-            then pure ""
-            else
-                lookupEnv "_FZFX_PANE" >>= \case
-                    Just p | not (null p) -> pure (T.pack p)
-                    _ ->
-                        lookupEnv "TMUX_TARGET_PANE" >>= \case
-                            Just p | not (null p) -> pure (T.pack p)
-                            _ -> fromMaybe "" <$> readProcMaybe "tmux" ["display-message", "-p", "#{pane_id}"]
-    let om = case omEnv of
-            "stdout" -> OStdout
-            "tmux" -> OTmux
-            _ -> if T.null pane then OStdout else OTmux
-    at <- (== "1") <$> envOr "_FZFX_AT_PREFIX" "0"
-    fd <- (\s -> if s == "d" then FdDirs else FdFiles) <$> envOr "_FZFX_FDTYPE" "f"
-    hid <- T.isInfixOf "--hidden" <$> envOr "_FZFX_HIDDEN" ""
+    pane <- case optPane of
+        Just p -> pure p
+        Nothing ->
+            if not inTmux
+                then pure ""
+                else
+                    lookupEnv "_FZFX_PANE" >>= \case
+                        Just p | not (null p) -> pure (T.pack p)
+                        _ ->
+                            lookupEnv "TMUX_TARGET_PANE" >>= \case
+                                Just p | not (null p) -> pure (T.pack p)
+                                _ -> fromMaybe "" <$> readProcMaybe "tmux" ["display-message", "-p", "#{pane_id}"]
+    om <- case optOutput of
+        Just m -> pure m
+        Nothing -> do
+            omEnv <- envOr "_FZFX_OUTPUT_MODE" ""
+            pure $ case omEnv of
+                "stdout" -> OStdout
+                "tmux" -> OTmux
+                _ -> if T.null pane then OStdout else OTmux
+    at <-
+        if optAtPrefix
+            then pure True
+            else (== "1") <$> envOr "_FZFX_AT_PREFIX" "0"
+    fd <- case optType of
+        Just ty -> pure ty
+        Nothing -> (\s -> if s == "d" then FdDirs else FdFiles) <$> envOr "_FZFX_FDTYPE" "f"
+    hid <-
+        if optHidden
+            then pure True
+            else T.isInfixOf "--hidden" <$> envOr "_FZFX_HIDDEN" ""
+    gitSt <-
+        if optGitStatus
+            then pure True
+            else (== "1") <$> envOr "_FZFX_GIT_STATUS" "0"
+    prevMode <- do
+        env <- envOr "_FZFX_PREV_MODE" ""
+        pure $ case env of
+            "diff" -> Diff
+            "content" -> Content
+            _ -> if gitSt then Diff else Content
+    previewOn <- case optPreview of
+        Just v -> pure v
+        Nothing -> (/= "0") <$> envOr "_FZFX_PREVIEW" "1"
+    previewLayout <- case optPreviewLayout of
+        Just lay -> pure lay
+        Nothing -> do
+            env <- envOr "_FZFX_PREVIEW_LAYOUT" ""
+            pure $ case env of
+                "bottom" -> PrevBottom
+                _ -> PrevRight
     q <-
         lookupEnv "_FZFX_QUERY" >>= \case
             Just v | not (null v) -> pure (T.pack v)
-            _ -> pure (T.unwords rest)
+            _ -> pure (T.unwords optQuery)
     git <- detectGit cwd
 
     at' <-
@@ -1019,7 +1321,7 @@ mainLaunch rest = do
                 , cFd = fd
                 , cHid = hid
                 , cIgn = False
-                , cPrev = Content
+                , cPrev = prevMode
                 , cFileQuery = fq
                 , cDirQuery = dq
                 , cQueryStack = persistedStack
@@ -1027,6 +1329,9 @@ mainLaunch rest = do
                 , cWasRg = False
                 , cSavedFileSel = fSel
                 , cSavedDirSel = dSel
+                , cGitSt = gitSt
+                , cPreviewOn = previewOn
+                , cPreviewLayout = previewLayout
                 }
 
     setCurrentDirectory (t cwd)

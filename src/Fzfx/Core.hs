@@ -8,6 +8,7 @@ module Fzfx.Core (
     GitStatus (..),
     FdType (..),
     PrevMode (..),
+    PreviewLayout (..),
     OutMode (..),
     LineInfo (..),
     Subcmd (..),
@@ -85,6 +86,9 @@ data FdType = FdFiles | FdDirs
 data PrevMode = Content | Diff
     deriving (Eq, Read, Show)
 
+data PreviewLayout = PrevRight | PrevBottom
+    deriving (Eq, Read, Show)
+
 data OutMode = OTmux | OStdout
     deriving (Eq, Read, Show)
 
@@ -119,6 +123,9 @@ data Subcmd
     | SSelRestore
     | SSmartEnter
     | SExtraArgs
+    | SPreviewWidth
+    | SZoxide
+    | STokei
     deriving (Eq, Enum, Bounded, Show)
 
 flg :: Subcmd -> Text
@@ -144,6 +151,9 @@ flg = \case
     SSelRestore -> "--sel-restore"
     SSmartEnter -> "--smart-enter"
     SExtraArgs -> "--extra-args"
+    SPreviewWidth -> "--preview-width"
+    SZoxide -> "--zoxide"
+    STokei -> "--tokei"
 
 parseSubcmd :: String -> Maybe Subcmd
 parseSubcmd s = lookup s [(T.unpack (flg c), c) | c <- [minBound .. maxBound]]
@@ -173,6 +183,9 @@ data Config = Config
     , cWasRg :: !Bool -- was last mode an rg mode?
     , cSavedFileSel :: ![Text] -- saved file mode selections
     , cSavedDirSel :: ![Text] -- saved dir mode selections
+    , cGitSt :: !Bool -- git status filter (only dirty files)
+    , cPreviewOn :: !Bool -- preview visible
+    , cPreviewLayout :: !PreviewLayout -- preview position (right/bottom)
     }
     deriving (Eq, Read, Show)
 
@@ -362,15 +375,16 @@ hdrText Config{..} =
             | otherwise = "\n" <> dim ("cwd: " <> tilde cCwd <> "  (from " <> tilde cOrig <> ")")
      in T.intercalate
             sep
-            [ "C-/ "
+            [ "C-t "
                 <> (if cFd == FdFiles then on "files" else off "files")
                 <> "/"
                 <> (if cFd == FdDirs then on "dirs" else off "dirs")
             , "M-h " <> tog cHid "hid"
             , "M-i " <> tog cIgn "ign"
-            , "M-p prev"
+            , "C-p " <> (if cPreviewLayout == PrevRight then off "→" else on "↓")
+            , "M-g " <> tog cGitSt "git changed"
+            , "C-M-g " <> (if cPrev == Diff then on "diff" else off "diff")
             , "M-u/s/?"
-            , "M-g " <> (if cPrev == Diff then on "diff" else off "diff")
             , "M-a " <> tog cAt "@"
             ]
             <> navLine
@@ -395,6 +409,8 @@ data ToggleName
     | TgDiff
     | TgHidden
     | TgNoIgnore
+    | TgGitStatus
+    | TgPreviewLayout
     | TgType -- auto-toggles between files/dirs
     | TgTypeD -- switch to dirs
     | TgTypeF -- switch to files
@@ -404,13 +420,14 @@ data ToggleName
 data FzfAction
     = ChangePrompt Text
     | ChangeQuery Text
-    | ChangeHeader Text -- pre-rendered header text
+    | ChangeFooter Text -- pre-rendered footer text
     | ReloadSync Text -- command to run
     | EnableSearch
     | DisableSearch
     | RefreshPreview
     | JumpFirst
     | Accept
+    | ChangePreviewWindow Text -- change-preview-window(...)
     | Become Text -- become: command
     | Execute Text -- execute(): command
     deriving (Eq, Show)
@@ -420,19 +437,30 @@ transition :: Config -> Event -> (Config, [FzfAction])
 -- Toggle: @ prefix
 transition cfg (EvToggle TgAtPrefix _) =
     let cfg' = cfg{cAt = not (cAt cfg)}
-     in (cfg', [ChangeHeader (hdrText cfg')])
+     in (cfg', [ChangeFooter (hdrText cfg')])
 -- Toggle: diff/content preview
 transition cfg (EvToggle TgDiff _) =
     let cfg' = cfg{cPrev = if cPrev cfg == Content then Diff else Content}
-     in (cfg', [RefreshPreview, ChangeHeader (hdrText cfg')])
+     in (cfg', [RefreshPreview, ChangeFooter (hdrText cfg')])
 -- Toggle: hidden files
 transition cfg (EvToggle TgHidden _) =
     let cfg' = cfg{cHid = not (cHid cfg)}
-     in (cfg', [reloadAction cfg', ChangeHeader (hdrText cfg')])
+     in (cfg', [reloadAction cfg', ChangeFooter (hdrText cfg')])
 -- Toggle: no-ignore
 transition cfg (EvToggle TgNoIgnore _) =
     let cfg' = cfg{cIgn = not (cIgn cfg)}
-     in (cfg', [reloadAction cfg', ChangeHeader (hdrText cfg')])
+     in (cfg', [reloadAction cfg', ChangeFooter (hdrText cfg')])
+-- Toggle: preview layout (right/bottom) — reload triggers result event for sizing
+transition cfg (EvToggle TgPreviewLayout _) =
+    let lay = if cPreviewLayout cfg == PrevRight then PrevBottom else PrevRight
+        cfg' = cfg{cPreviewLayout = lay}
+        dir = case lay of PrevRight -> "right"; PrevBottom -> "bottom"
+     in (cfg', [ChangePreviewWindow (dir <> ":50%"), reloadAction cfg', ChangeFooter (hdrText cfg')])
+-- Toggle: git status filter (only dirty files) — also toggles diff preview
+transition cfg (EvToggle TgGitStatus _) =
+    let on = not (cGitSt cfg)
+        cfg' = cfg{cGitSt = on, cPrev = if on then Diff else Content}
+     in (cfg', [reloadAction cfg', RefreshPreview, ChangeFooter (hdrText cfg')])
 -- Toggle: type auto (dispatch to D or F)
 transition cfg (EvToggle TgType q) =
     let target = if cFd cfg == FdFiles then TgTypeD else TgTypeF
@@ -450,7 +478,7 @@ transition cfg (EvToggle TgTypeD curQ)
               , ChangeQuery restoreQ
               ]
                 <> resetPos
-                <> [ChangeHeader (hdrText cfg')]
+                <> [ChangeFooter (hdrText cfg')]
             )
 -- Toggle: switch to files mode
 transition cfg (EvToggle TgTypeF curQ)
@@ -463,7 +491,7 @@ transition cfg (EvToggle TgTypeF curQ)
                 [ reloadWithQuery cfg' restoreQ
                 , ChangePrompt "files> "
                 , ChangeQuery restoreQ
-                , ChangeHeader (hdrText cfg')
+                , ChangeFooter (hdrText cfg')
                 ]
             )
 -- Transform: query changed — update prompt, search mode, reload
@@ -479,7 +507,7 @@ transition cfg (EvTransform q) =
                 { cWasRg = isRg
                 , cFd = if autoSwitchFd then FdFiles else cFd cfg
                 }
-        hdrUpd = [ChangeHeader (hdrText cfg') | autoSwitchFd]
+        hdrUpd = [ChangeFooter (hdrText cfg') | autoSwitchFd]
         promptName = case nFd of FdDirs -> "dirs"; FdFiles -> "files"
         act = case mode of
             FileMode
@@ -553,11 +581,12 @@ renderActions = T.intercalate "+" . map render1
   where
     render1 (ChangePrompt p) = "change-prompt(" <> p <> ")"
     render1 (ChangeQuery q) = "change-query(" <> q <> ")"
-    render1 (ChangeHeader h) = "change-header(" <> h <> ")"
+    render1 (ChangeFooter h) = "change-border-label(" <> h <> ")"
     render1 (ReloadSync cmd) = "reload-sync(" <> cmd <> ")"
     render1 EnableSearch = "enable-search"
     render1 DisableSearch = "disable-search"
     render1 RefreshPreview = "refresh-preview"
+    render1 (ChangePreviewWindow w) = "change-preview-window(" <> w <> ")"
     render1 JumpFirst = "first"
     render1 Accept = "accept"
     render1 (Become cmd) = "become:" <> cmd
