@@ -61,6 +61,12 @@ _fzfx_smart_completion() {
     # Quote each selected path if needed, join with spaces
     while IFS= read -r sel; do
         [[ -z "$sel" ]] && continue
+        # Strip rg-style :line:col suffix
+        if [[ "$sel" =~ ^(.+):[0-9]+:[0-9]+$ ]]; then
+            sel="${BASH_REMATCH[1]}"
+        elif [[ "$sel" =~ ^(.+):[0-9]+$ ]]; then
+            sel="${BASH_REMATCH[1]}"
+        fi
         if [[ "$sel" =~ [[:space:]\'\"\;\&\|\<\>\(\)\$\`\\\#\~\*\?] ]]; then
             printf -v sel '%q' "$sel"
         fi

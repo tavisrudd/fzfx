@@ -307,7 +307,7 @@ reloadFzfRg filt rgPat ex = unless (T.null rgPat) $ do
                 pure $ filter (not . T.null) (T.lines fout')
     unless (null targets) $ do
         let rgArgs =
-                ["--column", "--line-number", "--no-heading", "--color=always", "--smart-case"]
+                ["--with-filename", "--column", "--line-number", "--no-heading", "--color=always", "--smart-case"]
                     <> ex
                     <> ["--", rgPat]
                     <> targets
@@ -342,7 +342,7 @@ cmdPreview line = withCfg $ \Config{..} -> do
     if T.null (T.strip line)
         then contentPrev (not (T.null cGit)) "."
         else case parseLine line of
-            RgLine file ln -> do
+            RgLine file ln _ -> do
                 showSymlink file
                 let start = max 1 (ln - rows `div` 2)
                 exec "bat" ["--color=always", "--style=numbers", "--highlight-line", showT ln, "--line-range", showT start <> ":", "--", file]
@@ -400,7 +400,7 @@ cmdFullPreview line = withCfg $ \Config{..} -> do
     let lkFile = tmp </> "fzfx-lesskey"
     writeFile lkFile "#command\n\\e\\e quit\n\\n quit\n\\r quit\n^G quit\n\\e/ quit\n^X^S quit\n"
     case parseLine line of
-        RgLine file ln ->
+        RgLine file ln _ ->
             let pager = "less -Rc~ -j.5 +" <> show ln <> "g --lesskey-src=" <> lkFile
              in exec "bat" ["--color=always", "--style=numbers", "--highlight-line", showT ln, "--paging=always", "--pager", T.pack pager, "--", file]
         FdLine st path -> do
@@ -569,7 +569,7 @@ cmdEdit :: Text -> IO ()
 cmdEdit line = withCfg $ \_ -> do
     reopenTty
     case parseLine line of
-        RgLine f ln -> executeFile "tr-edit" True [t ("+" <> showT ln), t f] Nothing
+        RgLine f ln col -> executeFile "tr-edit" True [t ("+" <> showT ln <> ":" <> showT col), t f] Nothing
         FdLine _ p -> executeFile "tr-edit" True [t p] Nothing
 
 {- | Restore stdin/stdout to the terminal for become: handlers.
@@ -773,7 +773,7 @@ cmdTokei line = withCfg $ \Config{..} -> do
             FdLine _ p ->
                 let fp = t cCwd </> t p
                  in T.pack $ takeDirectory fp
-            RgLine f _ -> T.pack $ takeDirectory (t f)
+            RgLine f _ _ -> T.pack $ takeDirectory (t f)
     piped ("tokei", [dir]) ("less", ["-R"])
 
 cmdCopy :: Text -> IO ()
@@ -1075,9 +1075,11 @@ outputResults Config{..} sel = do
         isFzfLine = T.isInfixOf "\t"
         resolve line
             | isFzfLine line = case parseLine line of
-                RgLine f ln -> makeRelPath cOrig cCwd f <> ":" <> showT ln
+                RgLine f ln col -> makeRelPath cOrig cCwd f <> ":" <> showT ln <> ":" <> showT col
                 FdLine _ p -> makeRelPath cOrig cCwd p
-            | otherwise = line
+            | otherwise = case tryRg (stripAnsi line) of
+                Just (f, ln, col) -> makeRelPath cOrig cCwd f <> ":" <> showT ln <> ":" <> showT col
+                Nothing -> line
         files = dedup $ sort $ map resolve sel
     case cOut of
         OStdout -> mapM_ TIO.putStrLn files

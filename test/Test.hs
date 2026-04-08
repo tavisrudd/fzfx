@@ -65,11 +65,11 @@ main =
 tryRgTests :: [TestResult]
 tryRgTests =
     [ test "tryRg basic" $
-        tryRg "src/Main.hs:42:10:some code" == Just ("src/Main.hs", 42)
+        tryRg "src/Main.hs:42:10:some code" == Just ("src/Main.hs", 42, 10)
     , test "tryRg with colons in text" $
-        tryRg "file.hs:17:5:key: value" == Just ("file.hs", 17)
+        tryRg "file.hs:17:5:key: value" == Just ("file.hs", 17, 5)
     , test "tryRg with multiple colons in text" $
-        tryRg "file.hs:1:1:a:b:c" == Just ("file.hs", 1)
+        tryRg "file.hs:1:1:a:b:c" == Just ("file.hs", 1, 1)
     , test "tryRg no match on plain filename" $
         isNothing (tryRg "CLAUDE.md")
     , test "tryRg no match on fd line" $
@@ -83,15 +83,19 @@ tryRgTests =
     , test "tryRg non-digit col" $
         isNothing (tryRg "file:1:abc:text")
     , test "tryRg trailing colon (empty text)" $
-        tryRg "file:1:1:" == Just ("file", 1)
+        tryRg "file:1:1:" == Just ("file", 1, 1)
     , test "tryRg path with dots" $
-        tryRg "./src/Foo.hs:10:3:code" == Just ("./src/Foo.hs", 10)
+        tryRg "./src/Foo.hs:10:3:code" == Just ("./src/Foo.hs", 10, 3)
     , test "tryRg large line number" $
-        tryRg "f:99999:1:x" == Just ("f", 99999)
+        tryRg "f:99999:1:x" == Just ("f", 99999, 1)
     , test "tryRg single char file" $
-        tryRg "f:1:1:x" == Just ("f", 1)
+        tryRg "f:1:1:x" == Just ("f", 1, 1)
     , test "tryRg missing text after col" $
         isNothing (tryRg "f:1:1")
+    , test "tryRg no match on line:col:text without filename" $
+        isNothing (tryRg "37:5:    tryRg,")
+    , test "tryRg no match on line:col:text with non-digit col-position" $
+        isNothing (tryRg "4:29:Domain.Types: foo")
     ]
 
 -- ═══════════════════════════════════════════════════════════════════════
@@ -124,11 +128,11 @@ stripAnsiTests =
 parseLineTests :: [TestResult]
 parseLineTests =
     [ test "parseLine rg line" $
-        parseLine "src/Main.hs:42:10:code here" == RgLine "src/Main.hs" 42
+        parseLine "src/Main.hs:42:10:code here" == RgLine "src/Main.hs" 42 10
     , test "parseLine rg with ANSI" $
-        parseLine "\ESC[35msrc/Main.hs\ESC[0m:42:10:code" == RgLine "src/Main.hs" 42
+        parseLine "\ESC[35msrc/Main.hs\ESC[0m:42:10:code" == RgLine "src/Main.hs" 42 10
     , test "parseLine rg with colons in text" $
-        parseLine "file.hs:17:5:key: value" == RgLine "file.hs" 17
+        parseLine "file.hs:17:5:key: value" == RgLine "file.hs" 17 5
     , test "parseLine fd clean" $
         parseLine " \tCLAUDE.md" == FdLine Clean "CLAUDE.md"
     , test "parseLine fd unstaged" $
@@ -210,11 +214,11 @@ parseSFilterTests =
 lineAccessorTests :: [TestResult]
 lineAccessorTests =
     [ test "lineFile RgLine" $
-        lineFile (RgLine "src/Main.hs" 42) == "src/Main.hs"
+        lineFile (RgLine "src/Main.hs" 42 10) == "src/Main.hs"
     , test "lineFile FdLine" $
         lineFile (FdLine Clean "README.md") == "README.md"
     , test "lineRef RgLine" $
-        lineRef (RgLine "src/Main.hs" 42) == "src/Main.hs:42"
+        lineRef (RgLine "src/Main.hs" 42 10) == "src/Main.hs:42:10"
     , test "lineRef FdLine" $
         lineRef (FdLine Unstaged "file.txt") == "file.txt"
     ]

@@ -103,7 +103,7 @@ data OutMode = OTmux | OStdout
     deriving (Eq, Read, Show)
 
 data LineInfo
-    = RgLine Text Int -- file, line number
+    = RgLine Text Int Int -- file, line, col
     | FdLine GitStatus Text
     deriving (Eq, Show)
 
@@ -271,7 +271,7 @@ parseSFilter q
 
 parseLine :: Text -> LineInfo
 parseLine raw = case tryRg (stripAnsi raw) of
-    Just (f, ln) -> RgLine f ln
+    Just (f, ln, col) -> RgLine f ln col
     Nothing -> case T.breakOn "\t" raw of
         (lbl, rest)
             | not (T.null rest) -> FdLine (toSt (T.strip lbl)) (T.drop 1 rest)
@@ -283,7 +283,7 @@ parseLine raw = case tryRg (stripAnsi raw) of
     toSt _ = Clean
 
 -- | Parse rg output: file:line:col:text
-tryRg :: Text -> Maybe (Text, Int)
+tryRg :: Text -> Maybe (Text, Int, Int)
 tryRg s = case T.break (== ':') s of
     (file, rest1)
         | not (T.null file)
@@ -296,7 +296,7 @@ tryRg s = case T.break (== ':') s of
                             (colS, rest3)
                                 | isAllDigit colS
                                 , not (T.null rest3) ->
-                                    Just (file, read (T.unpack lnS))
+                                    Just (file, read (T.unpack lnS), read (T.unpack colS))
                             _ -> Nothing
                 _ -> Nothing
     _ -> Nothing
@@ -313,11 +313,11 @@ stripAnsi txt
     | otherwise = T.cons (T.head txt) (stripAnsi (T.tail txt))
 
 lineFile :: LineInfo -> Text
-lineFile (RgLine f _) = f
+lineFile (RgLine f _ _) = f
 lineFile (FdLine _ p) = p
 
 lineRef :: LineInfo -> Text
-lineRef (RgLine f ln) = f <> ":" <> showT ln
+lineRef (RgLine f ln col) = f <> ":" <> showT ln <> ":" <> showT col
 lineRef (FdLine _ p) = p
 
 -- ═══════════════════════════════════════════════════════════════════════
