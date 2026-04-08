@@ -1551,10 +1551,11 @@ detectAi pane = do
     case tty of
         Nothing -> pure False
         Just tty' -> do
-            (ec, out, _) <- readProcess $ proc "ps" ["-t", t tty', "-o", "comm="]
+            (ec, out, _) <- readProcess $ proc "ps" ["-t", t tty', "-o", "comm=,args="]
+            let keywords = ["claude", "codex", "gemini"]
             pure $ case ec of
                 ExitSuccess ->
                     any
-                        (\p -> any (`T.isInfixOf` p) ["claude", "codex", "gemini"])
+                        (\p -> any (`T.isInfixOf` p) keywords)
                         (filter (not . T.null) (T.lines (decodeOut out)))
                 _ -> False
