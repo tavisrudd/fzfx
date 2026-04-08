@@ -9,7 +9,7 @@ module Fzfx.Core (
     FdType (..),
     defaultFdType,
     fdTypeEnv,
-    PrevMode (..),
+    PreviewMode (..),
     PreviewLayout (..),
     OutMode (..),
     LineInfo (..),
@@ -93,10 +93,10 @@ fdTypeEnv FdFiles = "f"
 fdTypeEnv FdDirs = "d"
 fdTypeEnv FdMixed = "m"
 
-data PrevMode = Content | Diff
+data PreviewMode = Content | Diff
     deriving (Eq, Read, Show)
 
-data PreviewLayout = PrevRight | PrevBottom
+data PreviewLayout = PreviewRight | PreviewBottom
     deriving (Eq, Read, Show)
 
 data OutMode = OTmux | OStdout
@@ -187,7 +187,7 @@ data Config = Config
     , cFd :: !FdType
     , cHid :: !Bool -- hidden files
     , cIgn :: !Bool -- no-ignore
-    , cPrev :: !PrevMode
+    , cPreview :: !PreviewMode
     , cFileQuery :: !Text -- saved file mode query
     , cDirQuery :: !Text -- saved dir mode query
     , cQueryStack :: ![Text] -- query history stack
@@ -407,9 +407,9 @@ hdrText Config{..} =
             , "M-m " <> tog cMixed "mixed"
             , "M-h " <> tog cHid "hid"
             , "M-i " <> tog cIgn "ign"
-            , "C-p " <> (if cPreviewLayout == PrevRight then off "→" else on "↓")
+            , "C-p " <> (if cPreviewLayout == PreviewRight then off "→" else on "↓")
             , "M-g " <> tog cGitSt "git changed"
-            , "C-M-g " <> (if cPrev == Diff then on "diff" else off "diff")
+            , "C-M-g " <> (if cPreview == Diff then on "diff" else off "diff")
             , "C-f " <> (if cHeightAuto then dim "auto" else dim "full")
             , "M-u/s/?"
             , "M-a " <> tog cAt "@"
@@ -469,7 +469,7 @@ transition cfg (EvToggle TgAtPrefix _) =
      in (cfg', [ChangeFooter (hdrText cfg')])
 -- Toggle: diff/content preview
 transition cfg (EvToggle TgDiff _) =
-    let cfg' = cfg{cPrev = if cPrev cfg == Content then Diff else Content}
+    let cfg' = cfg{cPreview = if cPreview cfg == Content then Diff else Content}
      in (cfg', [RefreshPreview, ChangeFooter (hdrText cfg')])
 -- Toggle: hidden files
 transition cfg (EvToggle TgHidden _) =
@@ -481,14 +481,14 @@ transition cfg (EvToggle TgNoIgnore _) =
      in (cfg', [reloadAction cfg', ChangeFooter (hdrText cfg')])
 -- Toggle: preview layout (right/bottom) — reload triggers result event for sizing
 transition cfg (EvToggle TgPreviewLayout _) =
-    let lay = if cPreviewLayout cfg == PrevRight then PrevBottom else PrevRight
+    let lay = if cPreviewLayout cfg == PreviewRight then PreviewBottom else PreviewRight
         cfg' = cfg{cPreviewLayout = lay}
-        dir = case lay of PrevRight -> "right"; PrevBottom -> "bottom"
+        dir = case lay of PreviewRight -> "right"; PreviewBottom -> "bottom"
      in (cfg', [ChangePreviewWindow (dir <> ":50%"), reloadAction cfg', ChangeFooter (hdrText cfg')])
 -- Toggle: git status filter (only dirty files) — also toggles diff preview
 transition cfg (EvToggle TgGitStatus _) =
     let on = not (cGitSt cfg)
-        cfg' = cfg{cGitSt = on, cPrev = if on then Diff else Content}
+        cfg' = cfg{cGitSt = on, cPreview = if on then Diff else Content}
      in (cfg', [reloadAction cfg', RefreshPreview, ChangeFooter (hdrText cfg')])
 -- Toggle: type auto (dispatch to D or F/Mixed)
 transition cfg (EvToggle TgType q) =

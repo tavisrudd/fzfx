@@ -345,22 +345,19 @@ cmdPreview :: Text -> IO ()
 cmdPreview line = withCfg $ \Config{..} -> do
     rows <- maybe 40 readInt <$> lookupEnv "FZF_PREVIEW_LINES"
     if T.null (T.strip line)
-        then contentPrev (not (T.null cGit)) "."
+        then contentPreview (not (T.null cGit)) "."
         else case parseLine line of
             RgLine file ln _ -> do
                 showSymlink file
                 let start = max 1 (ln - rows `div` 2)
                 exec "bat" ["--color=always", "--style=numbers", "--highlight-line", showT ln, "--line-range", showT start <> ":", "--", file]
             FdLine st path
-                | cPrev == Diff
+                | cPreview == Diff
                 , st == Unstaged || st == Staged -> do
-                    isDir <- doesDirectoryExist (t path)
-                    if isDir
-                        then diffPrevDir path
-                        else diffPrev st path
+                    diffPreview st path
                 | otherwise -> do
                     showSymlink path
-                    contentPrev (not (T.null cGit)) path
+                    contentPreview (not (T.null cGit)) path
   where
     readInt s = case reads s of [(n, _)] -> n; _ -> 40 :: Int
 
@@ -371,29 +368,26 @@ diffArgs st path = case st of
     Untracked -> ["diff", "--no-index", "--", "/dev/null", path]
     Clean -> []
 
-diffPrevDir :: Text -> IO ()
-diffPrevDir path = do
-    let args = if path == "." then ["diff"] else ["diff", "--", path]
-    piped ("git", args) ("delta", [])
-
-diffPrev :: GitStatus -> Text -> IO ()
-diffPrev st path = do
+diffPreview :: GitStatus -> Text -> IO ()
+diffPreview st path = do
     let da = diffArgs st path
     if null da
-        then contentPrev True path
+        then contentPreview True path
         else piped ("git", da) ("delta", [])
 
-contentPrev :: Bool -> Text -> IO ()
-contentPrev inGit path = do
+ezaTreeArgs :: Bool -> Text -> [Text]
+ezaTreeArgs inGit p =
+    ["--icons", "--git-ignore", "--tree", "-L", "3", "--color=always"]
+        <> (if inGit then ["-l", "--no-permissions", "--no-filesize", "--no-user", "--no-time", "--git"] else [])
+        <> [p]
+
+contentPreview :: Bool -> Text -> IO ()
+contentPreview inGit path = do
     isDir <- doesDirectoryExist (t path)
     if isDir
         then do
             p <- if path == "." then T.pack <$> getCurrentDirectory else pure path
-            let gitArgs =
-                    if inGit
-                        then ["-l", "--no-permissions", "--no-filesize", "--no-user", "--no-time", "--git"]
-                        else []
-            exec "eza" (["--icons", "--git-ignore", "--tree", "-L", "3", "--color=always"] <> gitArgs <> [p])
+            exec "eza" (ezaTreeArgs inGit p)
         else
             if takeExtension (t path) == ".ipynb"
                 then exec "nbpreview" [path]
@@ -410,7 +404,7 @@ cmdFullPreview line = withCfg $ \Config{..} -> do
              in exec "bat" ["--color=always", "--style=numbers", "--highlight-line", showT ln, "--paging=always", "--pager", T.pack pager, "--", file]
         FdLine st path -> do
             let pager = "less -Rc~ --lesskey-src=" <> lkFile
-            if cPrev == Diff && st /= Clean
+            if cPreview == Diff && st /= Clean
                 then do
                     let da = diffArgs st path
                     piped ("git", da) ("delta", ["--paging=always", "--pager", T.pack pager])
@@ -419,12 +413,7 @@ cmdFullPreview line = withCfg $ \Config{..} -> do
                     if isDir
                         then do
                             p <- if path == "." then T.pack <$> getCurrentDirectory else pure path
-                            let inGit = not (T.null cGit)
-                                gitArgs =
-                                    if inGit
-                                        then ["-l", "--no-permissions", "--no-filesize", "--no-user", "--no-time", "--git"]
-                                        else []
-                            piped ("eza", ["--icons", "--git-ignore", "--tree", "-L", "3", "--color=always"] <> gitArgs <> [p]) ("less", ["-Rc~", "--lesskey-src=" <> T.pack lkFile])
+                            piped ("eza", ezaTreeArgs (not (T.null cGit)) p) ("less", ["-Rc~", "--lesskey-src=" <> T.pack lkFile])
                         else exec "bat" ["--color=always", "--style=plain", "--paging=always", "--pager", T.pack pager, "--", path]
 
 queryStackDir :: IO FilePath
@@ -645,7 +634,7 @@ cmdPreviewWidth = withCfg $ \Config{..} -> do
         let maxW = case reads content of [(n, _)] -> n; _ -> 0 :: Int
             readInt' s = case reads s of [(n, _)] -> n; _ -> 0 :: Int
         case cPreviewLayout of
-            PrevRight -> do
+            PreviewRight -> do
                 fzfCols <- lookupEnv "FZF_COLUMNS"
                 stdCols <- lookupEnv "COLUMNS"
                 let termW = case fzfCols of
@@ -656,7 +645,7 @@ cmdPreviewWidth = withCfg $ \Config{..} -> do
                     listNeed = maxW + 4
                     prevPct = max 50 (((termW - listNeed) * 100) `div` termW)
                 TIO.putStr $ "change-preview-window(right:" <> showT prevPct <> "%)"
-            PrevBottom -> do
+            PreviewBottom -> do
                 let lcFile = t cDir </> "line-count"
                 lcExists <- doesFileExist lcFile
                 when lcExists $ do
@@ -716,11 +705,11 @@ cmdDebug = withCfg $ \cfg -> do
             , "  "
                 <> bold "C-M-g"
                 <> "  diff/content "
-                <> (if cPrev == Diff then on "diff" else off "diff")
+                <> (if cPreview == Diff then on "diff" else off "diff")
                 <> " / "
-                <> (if cPrev == Content then on "content" else off "content")
+                <> (if cPreview == Content then on "content" else off "content")
             , "  " <> bold "M-p" <> "    preview      " <> if cPreviewOn then on "ON" else off "off"
-            , "  " <> bold "C-p" <> "    layout       " <> (case cPreviewLayout of PrevRight -> on "right"; PrevBottom -> on "bottom")
+            , "  " <> bold "C-p" <> "    layout       " <> (case cPreviewLayout of PreviewRight -> on "right"; PreviewBottom -> on "bottom")
             , "  " <> bold "C-f" <> "    height       " <> if cHeightAuto then on "auto" else on "full"
             , "  " <> bold "out" <> "    output       " <> (case cOut of OTmux -> on "tmux"; OStdout -> on "stdout")
             ]
@@ -749,10 +738,10 @@ cmdDebug = withCfg $ \cfg -> do
                 , ("cFd", "fd_type", showT cFd)
                 , ("cHid", "hidden", showT cHid)
                 , ("cIgn", "no_ignore", showT cIgn)
-                , ("cPrev", "preview_mode", showT cPrev)
+                , ("cPreview", "preview_mode", showT cPreview)
                 , ("cGitSt", "git_status", showT cGitSt)
-                , ("cPrevOn", "preview_on", showT cPreviewOn)
-                , ("cPrevLy", "preview_lay", showT cPreviewLayout)
+                , ("cPreviewOn", "preview_on", showT cPreviewOn)
+                , ("cPreviewLy", "preview_lay", showT cPreviewLayout)
                 , ("cHeight", "height", cHeight)
                 , ("cHtAuto", "height_auto", showT cHeightAuto)
                 , ("cMinHt", "min_height", showT cMinHeight)
@@ -906,8 +895,8 @@ cmdNavigate navAction sel query = do
             else do
                 out <- readProcMaybe "git" ["-C", nCwd', "status", "--porcelain"]
                 pure $ maybe False (not . T.null . T.strip) out
-    let nPrev = if cGitSt && not nGitSt then Content else cPrev
-        cfg = Config{cCwd = nCwd', cQuery = nQuery, cFd = nFd, cGitSt = nGitSt, cPrev = nPrev, cFileQuery = nFileQ, cDirQuery = nDirQ, ..}
+    let nPrev = if cGitSt && not nGitSt then Content else cPreview
+        cfg = Config{cCwd = nCwd', cQuery = nQuery, cFd = nFd, cGitSt = nGitSt, cPreview = nPrev, cFileQuery = nFileQ, cDirQuery = nDirQ, ..}
     relaunch cfg
 
 cmdZoxide :: Text -> IO ()
@@ -934,9 +923,9 @@ relaunch Config{..} = do
     setEnv "_FZFX_HIDDEN" (if cHid then "--hidden" else "")
     setEnv "_FZFX_NO_IGNORE" (if cIgn then "1" else "0")
     setEnv "_FZFX_GIT_STATUS" (if cGitSt then "1" else "0")
-    setEnv "_FZFX_PREV_MODE" (if cPrev == Diff then "diff" else "content")
+    setEnv "_FZFX_PREV_MODE" (if cPreview == Diff then "diff" else "content")
     setEnv "_FZFX_PREVIEW" (if cPreviewOn then "1" else "0")
-    setEnv "_FZFX_PREVIEW_LAYOUT" (case cPreviewLayout of PrevRight -> "right"; PrevBottom -> "bottom")
+    setEnv "_FZFX_PREVIEW_LAYOUT" (case cPreviewLayout of PreviewRight -> "right"; PreviewBottom -> "bottom")
     setEnv "_FZFX_HEIGHT" (t cHeight)
     setEnv "_FZFX_PROMPT" (t cPrompt)
     setEnv "_FZFX_MIXED" (if cMixed then "1" else "0")
@@ -1056,7 +1045,7 @@ fzfArgs cfg@Config{..} = baseOpts <> selfBindings <> staticBindings
             <> [ "--query=" <> cQuery
                , "--preview=" <> cSelf <> " " <> flg SPreview <> " {}"
                , "--preview-window="
-                    <> (case cPreviewLayout of PrevRight -> "right"; PrevBottom -> "bottom")
+                    <> (case cPreviewLayout of PreviewRight -> "right"; PreviewBottom -> "bottom")
                     <> ":50%"
                     <> (if cPreviewOn then "" else ":hidden")
                ]
@@ -1196,8 +1185,8 @@ parseOutMode = eitherReader $ \case
 
 parsePreviewLayout :: ReadM PreviewLayout
 parsePreviewLayout = eitherReader $ \case
-    "right" -> Right PrevRight
-    "bottom" -> Right PrevBottom
+    "right" -> Right PreviewRight
+    "bottom" -> Right PreviewBottom
     s -> Left $ "unknown layout: " <> s <> " (expected right|bottom)"
 
 parseFdType :: ReadM FdType
@@ -1458,8 +1447,8 @@ mainLaunch RunOpts{..} = do
         Nothing -> do
             env <- envOr "_FZFX_PREVIEW_LAYOUT" ""
             pure $ case env of
-                "bottom" -> PrevBottom
-                _ -> PrevRight
+                "bottom" -> PreviewBottom
+                _ -> PreviewRight
     heightRaw <- case optHeight of
         Just h -> pure h
         Nothing -> envOr "_FZFX_HEIGHT" "100%"
@@ -1509,7 +1498,7 @@ mainLaunch RunOpts{..} = do
                 , cFd = fd
                 , cHid = hid
                 , cIgn = ign
-                , cPrev = prevMode
+                , cPreview = prevMode
                 , cFileQuery = fq
                 , cDirQuery = dq
                 , cQueryStack = persistedStack

@@ -348,7 +348,7 @@ configRoundtripTests =
                     , cFd = FdFiles
                     , cHid = False
                     , cIgn = True
-                    , cPrev = Diff
+                    , cPreview = Diff
                     , cFileQuery = "some query"
                     , cDirQuery = ""
                     , cQueryStack = ["#foo", "bar#baz"]
@@ -358,7 +358,7 @@ configRoundtripTests =
                     , cSavedDirSel = []
                     , cGitSt = False
                     , cPreviewOn = True
-                    , cPreviewLayout = PrevRight
+                    , cPreviewLayout = PreviewRight
                     , cHeight = "100%"
                     , cHeightAuto = False
                     , cMinHeight = 0
@@ -381,7 +381,7 @@ configRoundtripTests =
                     , cFd = FdDirs
                     , cHid = True
                     , cIgn = False
-                    , cPrev = Content
+                    , cPreview = Content
                     , cFileQuery = ""
                     , cDirQuery = ""
                     , cQueryStack = []
@@ -391,7 +391,7 @@ configRoundtripTests =
                     , cSavedDirSel = []
                     , cGitSt = False
                     , cPreviewOn = True
-                    , cPreviewLayout = PrevRight
+                    , cPreviewLayout = PreviewRight
                     , cHeight = "40%"
                     , cHeightAuto = False
                     , cMinHeight = 0
@@ -432,7 +432,7 @@ testCfg =
         , cFd = FdFiles
         , cHid = False
         , cIgn = False
-        , cPrev = Content
+        , cPreview = Content
         , cFileQuery = ""
         , cDirQuery = ""
         , cQueryStack = []
@@ -442,7 +442,7 @@ testCfg =
         , cSavedDirSel = []
         , cGitSt = False
         , cPreviewOn = True
-        , cPreviewLayout = PrevRight
+        , cPreviewLayout = PreviewRight
         , cHeight = "100%"
         , cHeightAuto = False
         , cMinHeight = 0
@@ -485,11 +485,11 @@ transitionToggleTests =
     , -- diff toggle
       test "toggle diff: Content → Diff" $
         let (cfg', _) = transition testCfg (EvToggle TgDiff "")
-         in cPrev cfg' == Diff
+         in cPreview cfg' == Diff
     , test "toggle diff: Diff → Content" $
-        let cfg1 = testCfg{cPrev = Diff}
+        let cfg1 = testCfg{cPreview = Diff}
             (cfg', _) = transition cfg1 (EvToggle TgDiff "")
-         in cPrev cfg' == Content
+         in cPreview cfg' == Content
     , test "toggle diff: emits refresh-preview" $
         let (_, acts) = transition testCfg (EvToggle TgDiff "")
          in hasAction RefreshPreview acts
@@ -552,27 +552,27 @@ transitionToggleTests =
         let (cfg', _) = transition testCfg (EvToggle TgGitStatus "")
          in cGitSt cfg'
     , test "toggle git_status: on → off, clears cGitSt" $
-        let cfg1 = testCfg{cGitSt = True, cPrev = Diff}
+        let cfg1 = testCfg{cGitSt = True, cPreview = Diff}
             (cfg', _) = transition cfg1 (EvToggle TgGitStatus "")
          in not (cGitSt cfg')
     , test "toggle git_status: on → also enables diff preview" $
         let (cfg', _) = transition testCfg (EvToggle TgGitStatus "")
-         in cPrev cfg' == Diff
+         in cPreview cfg' == Diff
     , test "toggle git_status: off → also disables diff preview" $
-        let cfg1 = testCfg{cGitSt = True, cPrev = Diff}
+        let cfg1 = testCfg{cGitSt = True, cPreview = Diff}
             (cfg', _) = transition cfg1 (EvToggle TgGitStatus "")
-         in cPrev cfg' == Content
+         in cPreview cfg' == Content
     , test "toggle git_status: emits reload + refresh-preview + footer" $
         let (_, acts) = transition testCfg (EvToggle TgGitStatus "")
          in hasReload acts && hasAction RefreshPreview acts && hasFooter acts
     , -- preview layout toggle
       test "toggle preview_layout: right → bottom" $
         let (cfg', _) = transition testCfg (EvToggle TgPreviewLayout "")
-         in cPreviewLayout cfg' == PrevBottom
+         in cPreviewLayout cfg' == PreviewBottom
     , test "toggle preview_layout: bottom → right" $
-        let cfg1 = testCfg{cPreviewLayout = PrevBottom}
+        let cfg1 = testCfg{cPreviewLayout = PreviewBottom}
             (cfg', _) = transition cfg1 (EvToggle TgPreviewLayout "")
-         in cPreviewLayout cfg' == PrevRight
+         in cPreviewLayout cfg' == PreviewRight
     , test "toggle preview_layout: emits change-preview-window + reload + footer" $
         let (_, acts) = transition testCfg (EvToggle TgPreviewLayout "")
          in hasPreviewWindow acts && hasReload acts && hasFooter acts
@@ -580,7 +580,7 @@ transitionToggleTests =
         let (_, acts) = transition testCfg (EvToggle TgPreviewLayout "")
          in hasAction (ChangePreviewWindow "bottom:50%") acts
     , test "toggle preview_layout: bottom → emits right direction" $
-        let cfg1 = testCfg{cPreviewLayout = PrevBottom}
+        let cfg1 = testCfg{cPreviewLayout = PreviewBottom}
             (_, acts) = transition cfg1 (EvToggle TgPreviewLayout "")
          in hasAction (ChangePreviewWindow "right:50%") acts
     ]
