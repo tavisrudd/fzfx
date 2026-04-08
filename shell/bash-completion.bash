@@ -36,7 +36,7 @@ _fzfx_smart_completion() {
 
     # Everything else: file/dir picking via fzfx
     local cmd="${stripped%%[[:space:]]*}"
-    local fzfx_args=(-o stdout)
+    local fzfx_args=(-o stdout --hidden)
 
     # Directory-only mode for commands that expect directories, mixed for general use
     case "$cmd" in

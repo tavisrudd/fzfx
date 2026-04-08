@@ -3,6 +3,11 @@
 # Skip tests with: SKIP_TESTS=1 git commit
 set -euo pipefail
 
+# Ensure nix devshell tools (fourmolu, hlint, cabal) are on PATH
+if [ -z "${IN_NIX_SHELL:-}" ] && command -v direnv &>/dev/null; then
+  eval "$(direnv export bash 2>/dev/null)"
+fi
+
 echo "pre-commit: fourmolu check..."
 fourmolu --mode check src/ test/
 
