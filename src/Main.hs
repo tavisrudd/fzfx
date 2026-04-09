@@ -669,7 +669,13 @@ cmdDebug = withCfg $ \cfg -> do
     let args = fzfArgs cfg
         self = cSelf cfg
         abbrev = "fzfx"
-        content = T.unlines $ toggleSummary cfg <> ["", "# fzfArgs  (fzfx=" <> self <> ")", ""] <> map (formatArg self abbrev) args <> ["", "# config", ""] <> prettyConfig cfg
+        content =
+            T.unlines $
+                toggleSummary cfg
+                    <> ["", "# fzfArgs  (fzfx=" <> self <> ")", ""]
+                    <> map (formatArg self abbrev) args
+                    <> ["", "# config", ""]
+                    <> prettyConfig cfg
     runProcess_ $
         setStdin (byteStringInput (LBS.fromStrict (TE.encodeUtf8 content))) $
             proc "less" ["-R"]
