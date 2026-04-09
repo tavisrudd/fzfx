@@ -63,6 +63,7 @@ module Fzfx.Core (
 
 import Data.ByteString.Lazy qualified as LBS
 import Data.Char (isDigit)
+import Data.List qualified as L
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -76,10 +77,10 @@ import System.FilePath qualified as FP
 
 data SearchMode
     = FileMode
-    | RgLive Text [Text] -- pattern, extra args
-    | RgLocked Text Text [Text] -- pattern, filter, extra args
-    | FzfRg Text Text [Text] -- fzf filter, rg pattern, extra args
-    | FzfRgPending Text -- fzf filter (waiting for rg input after #)
+    | RgLive !Text ![Text] -- pattern, extra args
+    | RgLocked !Text !Text ![Text] -- pattern, filter, extra args
+    | FzfRg !Text !Text ![Text] -- fzf filter, rg pattern, extra args
+    | FzfRgPending !Text -- fzf filter (waiting for rg input after #)
     deriving (Eq, Show)
 
 data GitStatus = Unstaged | Staged | Untracked | Clean
@@ -106,8 +107,8 @@ data OutMode = OTmux | OStdout
     deriving (Eq, Read, Show)
 
 data LineInfo
-    = RgLine Text Int Int -- file, line, col
-    | FdLine GitStatus Text
+    = RgLine !Text !Int !Int -- file, line, col
+    | FdLine !GitStatus !Text
     deriving (Eq, Show)
 
 -- ═══════════════════════════════════════════════════════════════════════
@@ -125,7 +126,7 @@ data Subcmd
     | SForgit
     | SCopy
     | SDebug
-    | SSwap
+    | SSwap -- TODO: rename this
     | SFullPreview
     | SQueryPush
     | SQueryPop
@@ -352,7 +353,7 @@ makeRelPath orig cwd path
     normOrig = dropTrailingSep $ FP.normalise (t orig)
     normCwd = dropTrailingSep $ FP.normalise (t cwd)
     joinPath [] = "."
-    joinPath ps = foldl1 (</>) ps
+    joinPath ps = L.foldl1' (</>) ps
 
 -- ═══════════════════════════════════════════════════════════════════════
 -- List Utilities
@@ -425,13 +426,13 @@ hdrText Config{..} =
 
 -- | Events that trigger state transitions
 data Event
-    = EvToggle ToggleName Text -- toggle name, current query
-    | EvTransform Text -- query changed (the query text)
-    | EvSwap Text -- swap query format
-    | EvExtraArgs Text -- insert " -- " for extra rg args
-    | EvSmartEnter Bool -- is alt-enter?
-    | EvQueryPush Text -- save query to stack
-    | EvQueryDelete Text -- remove query from stack
+    = EvToggle !ToggleName !Text -- toggle name, current query
+    | EvTransform !Text -- query changed (the query text)
+    | EvSwap !Text -- swap query format
+    | EvExtraArgs !Text -- insert " -- " for extra rg args
+    | EvSmartEnter !Bool -- is alt-enter?
+    | EvQueryPush !Text -- save query to stack
+    | EvQueryDelete !Text -- remove query from stack
     deriving (Eq, Show)
 
 data ToggleName
@@ -450,18 +451,18 @@ data ToggleName
 
 -- | FZF actions to emit (composed with +)
 data FzfAction
-    = ChangePrompt Text
-    | ChangeQuery Text
-    | ChangeFooter Text -- pre-rendered footer text
-    | ReloadSync Text -- command to run
+    = ChangePrompt !Text
+    | ChangeQuery !Text
+    | ChangeFooter !Text -- pre-rendered footer text
+    | ReloadSync !Text -- command to run
     | EnableSearch
     | DisableSearch
     | RefreshPreview
     | JumpFirst
     | Accept
-    | ChangePreviewWindow Text -- change-preview-window(...)
-    | Become Text -- become: command
-    | Execute Text -- execute(): command
+    | ChangePreviewWindow !Text -- change-preview-window(...)
+    | Become !Text -- become: command
+    | Execute !Text -- execute(): command
     deriving (Eq, Show)
 
 -- | Pure state transition: config + event → (new config, fzf actions)

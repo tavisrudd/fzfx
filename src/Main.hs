@@ -10,6 +10,7 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.Char (chr)
 import Data.List (partition, sort)
+import Data.List qualified as L
 import Data.Maybe (fromMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -719,7 +720,7 @@ cmdDebug = withCfg $ \cfg -> do
             , "  " <> bold "out" <> "    output       " <> (case cOut of OTmux -> on "tmux"; OStdout -> on "stdout")
             ]
     prettifyBash s =
-        foldl
+        L.foldl'
             (\acc (pat, rep) -> T.replace pat rep acc)
             s
             [ ("; then ", ";\n      then ")
