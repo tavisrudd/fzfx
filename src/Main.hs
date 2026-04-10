@@ -543,13 +543,69 @@ cmdSmartEnter args = do
 cmdEdit :: Text -> IO ()
 cmdEdit line = withCfg $ \_ -> do
     reopenTty
-    editorWords <- T.words <$> envOrM "FZFX_EDITOR" (envOr "EDITOR" "nano")
-    let (cmd, edArgs) = case editorWords of
-            (c : a) -> (t c, map t a)
-            [] -> ("nano", [])
+    (cmd, edArgs) <- getEditorCmdPlusArgs
     case parseLine line of
-        RgLine f ln col -> executeFile cmd True (edArgs <> [t ("+" <> showT ln <> ":" <> showT col), t f]) Nothing
+        RgLine f ln col -> do
+            posStyle <- guessEditorPosStyle cmd
+            executeFile cmd True (edArgs <> editorPosArgs posStyle (t f) ln col) Nothing
         FdLine _ p -> executeFile cmd True (edArgs <> [t p]) Nothing
+
+getEditorCmdPlusArgs :: IO (String, [String])
+getEditorCmdPlusArgs = do
+    editorWords <- T.words <$> envOrM "FZFX_EDITOR" (envOr "EDITOR" "nano")
+    pure $ case editorWords of
+        (c : a) -> (t c, map t a)
+        [] -> ("nano", [])
+
+data EditorPosStyle
+    = -- | +line:col file
+      PosEmacs
+    | -- | +line,col file
+      PosNano
+    | -- | +call cursor(line,col) file
+      PosVim
+    | -- | --goto file:line:col
+      PosGoto
+    | -- | file:line:col
+      PosFileColon
+    | -- | --line L --column C file
+      PosFlags
+    | -- | file only
+      PosNone
+
+{- | Determine position argument style from FZFX_EDITOR_HANDLE_POS_ARGS_LIKE
+env var, falling back to the editor command's basename.
+-}
+guessEditorPosStyle :: String -> IO EditorPosStyle
+guessEditorPosStyle cmd = do
+    override <- lookupEnv "FZFX_EDITOR_HANDLE_POS_ARGS_LIKE"
+    pure $ classify (fromMaybe (FP.takeBaseName cmd) override)
+  where
+    classify name
+        | name `elem` emacsLike = PosEmacs
+        | name `elem` nanoLike = PosNano
+        | name `elem` vimLike = PosVim
+        | name `elem` vscodeLike = PosGoto
+        | name `elem` colonLike = PosFileColon
+        | name `elem` flagLike = PosFlags
+        | otherwise = PosNone
+    emacsLike = ["emacs", "emacsclient", "mg", "micro", "kak", "jed", "mcedit"]
+    nanoLike = ["nano", "pico"]
+    vimLike = ["vim", "nvim", "vi", "view", "gvim", "mvim"]
+    vscodeLike = ["code", "code-insiders", "codium", "code-oss"]
+    colonLike = ["subl", "sublime_text", "hx", "zed"]
+    flagLike = ["kate", "idea", "goland", "pycharm", "webstorm", "clion", "rubymine", "phpstorm", "rider"]
+
+-- | Build position and file arguments adapted to the editor's expected syntax.
+editorPosArgs :: EditorPosStyle -> String -> Int -> Int -> [String]
+editorPosArgs posStyle file ln col = case posStyle of
+    PosEmacs -> ["+" <> show ln <> ":" <> show col, file]
+    PosNano -> ["+" <> show ln <> "," <> show col, file]
+    PosVim -> ["+call cursor(" <> show ln <> "," <> show col <> ")", file]
+    PosGoto -> ["--goto", file <> ":" <> show ln <> ":" <> show col]
+    PosFileColon -> [file <> ":" <> show ln <> ":" <> show col]
+    PosFlags -> ["--line", show ln, "--column", show col, file]
+    PosNone -> [file]
 
 {- | Restore stdin/stdout to the terminal for become: handlers.
 fzfx pipes fzf's stdin (reload data) and stdout (selection capture),
