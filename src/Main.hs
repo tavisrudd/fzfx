@@ -328,25 +328,31 @@ showSymlink path = do
         TIO.putStrLn $ "\ESC[36m→ " <> target <> "\ESC[0m"
         hFlush stdout
 
+batHighlight :: Text -> Int -> [Text] -> IO ()
+batHighlight file ln extraArgs =
+    exec "bat" $ ["--color=always", "--style=numbers", "--highlight-line", showT ln] <> extraArgs <> ["--", file]
+
 cmdPreview :: Text -> IO ()
 cmdPreview line = withCfg $ \Config{..} -> do
     rows <- maybe 40 readInt <$> lookupEnv "FZF_PREVIEW_LINES"
     if T.null (T.strip line)
         then contentPreview (not (T.null cGit)) "."
-        else case parseLine line of
-            RgLine file ln _ -> do
-                showSymlink file
-                let start = max 1 (ln - rows `div` 2)
-                exec "bat" ["--color=always", "--style=numbers", "--highlight-line", showT ln, "--line-range", showT start <> ":", "--", file]
+        else case parseFzfItem line of
+            RgLine file ln _ -> highlightPreview rows file ln
+            BookmarkLine file ln _ -> highlightPreview rows file ln
             FdLine st path
                 | cPreview == Diff
-                , st == Unstaged || st == Staged -> do
+                , st == Unstaged || st == Staged ->
                     diffPreview st path
                 | otherwise -> do
                     showSymlink path
                     contentPreview (not (T.null cGit)) path
   where
     readInt s = case reads s of [(n, _)] -> n; _ -> 40 :: Int
+    highlightPreview rows file ln = do
+        showSymlink file
+        let start = max 1 (ln - rows `div` 2)
+        batHighlight file ln ["--line-range", showT start <> ":"]
 
 diffArgs :: GitStatus -> Text -> [Text]
 diffArgs st path = case st of
@@ -387,10 +393,9 @@ cmdFullPreview line = withCfg $ \Config{..} -> do
     tmp <- getTemporaryDirectory
     let lkFile = tmp </> "fzfx-lesskey"
     writeFile lkFile "#command\n\\e\\e quit\n\\n quit\n\\r quit\n^G quit\n\\e/ quit\n^X^S quit\n"
-    case parseLine line of
-        RgLine file ln _ ->
-            let pager = "less -Rc~ -j.5 +" <> show ln <> "g --lesskey-src=" <> lkFile
-             in exec "bat" ["--color=always", "--style=numbers", "--highlight-line", showT ln, "--paging=always", "--pager", T.pack pager, "--", file]
+    case parseFzfItem line of
+        RgLine file ln _ -> highlightFull lkFile file ln
+        BookmarkLine file ln _ -> highlightFull lkFile file ln
         FdLine st path -> do
             let pager = "less -Rc~ --lesskey-src=" <> lkFile
             if cPreview == Diff && st /= Clean
@@ -404,6 +409,10 @@ cmdFullPreview line = withCfg $ \Config{..} -> do
                             p <- if path == "." then T.pack <$> getCurrentDirectory else pure path
                             piped ("eza", ezaTreeArgs (not (T.null cGit)) p) ("less", ["-Rc~", "--lesskey-src=" <> T.pack lkFile])
                         else exec "bat" ["--color=always", "--style=plain", "--paging=always", "--pager", T.pack pager, "--", path]
+  where
+    highlightFull lkFile file ln =
+        let pager = "less -Rc~ -j.5 +" <> show ln <> "g --lesskey-src=" <> lkFile
+         in batHighlight file ln ["--paging=always", "--pager", T.pack pager]
 
 queryStackDir :: IO FilePath
 queryStackDir = do
@@ -551,8 +560,11 @@ cmdEdit :: Text -> IO ()
 cmdEdit line = withCfg $ \_ -> do
     reopenTty
     (cmd, edArgs) <- getEditorCmdPlusArgs
-    case parseLine line of
+    case parseFzfItem line of
         RgLine f ln col -> do
+            posStyle <- guessEditorPosStyle cmd
+            executeFile cmd True (edArgs <> editorPosArgs posStyle (t f) ln col) Nothing
+        BookmarkLine f ln col -> do
             posStyle <- guessEditorPosStyle cmd
             executeFile cmd True (edArgs <> editorPosArgs posStyle (t f) ln col) Nothing
         FdLine _ p -> executeFile cmd True (edArgs <> [t p]) Nothing
@@ -810,25 +822,26 @@ cmdExtraArgs q = do
 
 cmdMagit :: Text -> IO ()
 cmdMagit line = withCfg $ \_ ->
-    exec "magit-file-status" [lineFile (parseLine line)]
+    exec "magit-file-status" [lineFile (parseFzfItem line)]
 
 cmdForgit :: Text -> IO ()
 cmdForgit line = withCfg $ \_ ->
-    exec "git-forgit" ["log", "--", lineFile (parseLine line)]
+    exec "git-forgit" ["log", "--", lineFile (parseFzfItem line)]
 
 cmdTokei :: Text -> IO ()
 cmdTokei line = withCfg $ \Config{..} -> do
     reopenTty
-    let dir = case parseLine line of
+    let dir = case parseFzfItem line of
             FdLine _ p ->
                 let fp = t cCwd </> t p
                  in T.pack $ takeDirectory fp
             RgLine f _ _ -> T.pack $ takeDirectory (t f)
+            BookmarkLine f _ _ -> T.pack $ takeDirectory (t f)
     piped ("tokei", [dir]) ("less", ["-R"])
 
 cmdCopy :: Text -> IO ()
 cmdCopy line = do
-    let path = T.stripEnd $ lineFile (parseLine line)
+    let path = T.stripEnd $ lineFile (parseFzfItem line)
     runProcess_ $
         setStdin (byteStringInput (LBS.fromStrict (TE.encodeUtf8 path))) $
             proc "tmux" ["load-buffer", "-w", "-"]
@@ -876,7 +889,7 @@ cmdNavigate args = do
             (a : l : q : _) -> (a, l, q)
             _ -> error $ "navigate: expected 3 args, got " <> show (length args)
     Config{..} <- loadConfig
-    let sp = T.dropWhileEnd (== pathSeparator) $ lineFile (parseLine sel)
+    let sp = T.dropWhileEnd (== pathSeparator) $ lineFile (parseFzfItem sel)
     nCwd <- case navAction of
         "into" -> do
             let target = t cCwd </> t sp
@@ -1149,8 +1162,9 @@ outputResults Config{..} sel = do
         -- and are already resolved — pass them through unchanged.
         isFzfLine = T.isInfixOf "\t"
         resolve line
-            | isFzfLine line = case parseLine line of
+            | isFzfLine line = case parseFzfItem line of
                 RgLine f ln col -> makeRelPath cOrig cCwd f <> ":" <> showT ln <> ":" <> showT col
+                BookmarkLine f ln col -> makeRelPath cOrig cCwd f <> ":" <> showT ln <> ":" <> showT col
                 FdLine _ p -> makeRelPath cOrig cCwd p
             | otherwise = case tryRg (stripAnsi line) of
                 Just (f, ln, col) -> makeRelPath cOrig cCwd f <> ":" <> showT ln <> ":" <> showT col

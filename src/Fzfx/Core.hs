@@ -11,7 +11,7 @@ module Fzfx.Core (
     PreviewMode (..),
     PreviewLayout (..),
     OutMode (..),
-    LineInfo (..),
+    FzfItem (..),
     Subcmd (..),
     Config (..),
 
@@ -32,11 +32,12 @@ module Fzfx.Core (
     -- * Query & Line Parsing
     parseQuery,
     parseSFilter,
-    parseLine,
+    parseFzfItem,
     tryRg,
+    tryBookmark,
     stripAnsi,
 
-    -- * LineInfo Accessors
+    -- * FzfItem Accessors
     lineFile,
     lineRef,
 
@@ -101,8 +102,9 @@ data PreviewLayout = PreviewRight | PreviewBottom
 data OutMode = OTmux | OStdout
     deriving (Eq, Read, Show)
 
-data LineInfo
+data FzfItem
     = RgLine !Text !Int !Int -- file, line, col
+    | BookmarkLine !Text !Int !Int -- file:line:col (no trailing text)
     | FdLine !GitStatus !Text
     deriving (Eq, Show)
 
@@ -271,14 +273,17 @@ parseSFilter q
     | Just r <- T.stripPrefix "^? " q = (Just Untracked, r)
     | otherwise = (Nothing, q)
 
-parseLine :: Text -> LineInfo
-parseLine raw = case tryRg (stripAnsi raw) of
+parseFzfItem :: Text -> FzfItem
+parseFzfItem raw = case tryRg stripped of
     Just (f, ln, col) -> RgLine f ln col
-    Nothing -> case T.breakOn "\t" raw of
-        (lbl, rest)
-            | not (T.null rest) -> FdLine (toSt (T.strip lbl)) (T.drop 1 rest)
-            | otherwise -> FdLine Clean (T.strip raw)
+    Nothing -> case tryBookmark stripped of
+        Just (f, ln, col) -> BookmarkLine f ln col
+        Nothing -> case T.breakOn "\t" raw of
+            (lbl, rest)
+                | not (T.null rest) -> FdLine (toSt (T.strip lbl)) (T.drop 1 rest)
+                | otherwise -> FdLine Clean (T.strip raw)
   where
+    stripped = stripAnsi raw
     toSt "U" = Unstaged
     toSt "S" = Staged
     toSt "?" = Untracked
@@ -298,6 +303,22 @@ tryRg s = do
     guard (not (T.null rest3))
     pure (file, ln, col)
 
+-- | Parse bookmark: file:line:col or file:line (col defaults to 1)
+tryBookmark :: Text -> Maybe (Text, Int, Int)
+tryBookmark s = do
+    let (file, rest1) = T.break (== ':') s
+    guard (not (T.null file))
+    r1 <- T.stripPrefix ":" rest1
+    guard (not (T.null r1))
+    let (lnS, rest2) = T.break (== ':') r1
+    ln <- readMaybe (T.unpack lnS)
+    if T.null rest2
+        then pure (file, ln, 1)
+        else do
+            r2 <- T.stripPrefix ":" rest2
+            col <- readMaybe (T.unpack r2)
+            pure (file, ln, col)
+
 stripAnsi :: Text -> Text
 stripAnsi txt = case T.uncons txt of
     Nothing -> txt
@@ -307,12 +328,14 @@ stripAnsi txt = case T.uncons txt of
         Nothing -> txt
     Just (c, rest) -> T.cons c (stripAnsi rest)
 
-lineFile :: LineInfo -> Text
+lineFile :: FzfItem -> Text
 lineFile (RgLine f _ _) = f
+lineFile (BookmarkLine f _ _) = f
 lineFile (FdLine _ p) = p
 
-lineRef :: LineInfo -> Text
+lineRef :: FzfItem -> Text
 lineRef (RgLine f ln col) = f <> ":" <> showT ln <> ":" <> showT col
+lineRef (BookmarkLine f ln col) = f <> ":" <> showT ln <> ":" <> showT col
 lineRef (FdLine _ p) = p
 
 -- ═══════════════════════════════════════════════════════════════════════

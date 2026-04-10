@@ -37,8 +37,9 @@ main =
     runTests $
         concat
             [ tryRgTests
+            , tryBookmarkTests
             , stripAnsiTests
-            , parseLineTests
+            , parseFzfItemTests
             , parseQueryTests
             , parseSFilterTests
             , lineAccessorTests
@@ -99,6 +100,34 @@ tryRgTests =
     ]
 
 -- ═══════════════════════════════════════════════════════════════════════
+-- tryBookmark
+-- ═══════════════════════════════════════════════════════════════════════
+
+tryBookmarkTests :: [TestResult]
+tryBookmarkTests =
+    [ test "tryBookmark file:line:col" $
+        tryBookmark "src/Main.hs:843:9" == Just ("src/Main.hs", 843, 9)
+    , test "tryBookmark file:line (col defaults to 1)" $
+        tryBookmark "src/Main.hs:843" == Just ("src/Main.hs", 843, 1)
+    , test "tryBookmark no match on rg line (has text)" $
+        isNothing (tryBookmark "file:1:1:some text")
+    , test "tryBookmark no match on plain filename" $
+        isNothing (tryBookmark "CLAUDE.md")
+    , test "tryBookmark no match on empty" $
+        isNothing (tryBookmark "")
+    , test "tryBookmark path with dots" $
+        tryBookmark "./src/Foo.hs:10:3" == Just ("./src/Foo.hs", 10, 3)
+    , test "tryBookmark non-digit line" $
+        isNothing (tryBookmark "file:abc")
+    , test "tryBookmark non-digit col" $
+        isNothing (tryBookmark "file:1:abc")
+    , test "tryBookmark trailing colon" $
+        isNothing (tryBookmark "file:1:")
+    , test "tryBookmark col with trailing text" $
+        isNothing (tryBookmark "file:1:2:text")
+    ]
+
+-- ═══════════════════════════════════════════════════════════════════════
 -- stripAnsi
 -- ═══════════════════════════════════════════════════════════════════════
 
@@ -122,31 +151,37 @@ stripAnsiTests =
     ]
 
 -- ═══════════════════════════════════════════════════════════════════════
--- parseLine
+-- parseFzfItem
 -- ═══════════════════════════════════════════════════════════════════════
 
-parseLineTests :: [TestResult]
-parseLineTests =
-    [ test "parseLine rg line" $
-        parseLine "src/Main.hs:42:10:code here" == RgLine "src/Main.hs" 42 10
-    , test "parseLine rg with ANSI" $
-        parseLine "\ESC[35msrc/Main.hs\ESC[0m:42:10:code" == RgLine "src/Main.hs" 42 10
-    , test "parseLine rg with colons in text" $
-        parseLine "file.hs:17:5:key: value" == RgLine "file.hs" 17 5
-    , test "parseLine fd clean" $
-        parseLine " \tCLAUDE.md" == FdLine Clean "CLAUDE.md"
-    , test "parseLine fd unstaged" $
-        parseLine "U\tfile.txt" == FdLine Unstaged "file.txt"
-    , test "parseLine fd staged" $
-        parseLine "S\tfile.txt" == FdLine Staged "file.txt"
-    , test "parseLine fd untracked" $
-        parseLine "?\tfile.txt" == FdLine Untracked "file.txt"
-    , test "parseLine plain filename" $
-        parseLine "CLAUDE.md" == FdLine Clean "CLAUDE.md"
-    , test "parseLine fd with path" $
-        parseLine " \tsrc/Foo/Bar.hs" == FdLine Clean "src/Foo/Bar.hs"
-    , test "parseLine fd unknown status label" $
-        parseLine "X\tfile.txt" == FdLine Clean "file.txt"
+parseFzfItemTests :: [TestResult]
+parseFzfItemTests =
+    [ test "parseFzfItem rg line" $
+        parseFzfItem "src/Main.hs:42:10:code here" == RgLine "src/Main.hs" 42 10
+    , test "parseFzfItem rg with ANSI" $
+        parseFzfItem "\ESC[35msrc/Main.hs\ESC[0m:42:10:code" == RgLine "src/Main.hs" 42 10
+    , test "parseFzfItem rg with colons in text" $
+        parseFzfItem "file.hs:17:5:key: value" == RgLine "file.hs" 17 5
+    , test "parseFzfItem fd clean" $
+        parseFzfItem " \tCLAUDE.md" == FdLine Clean "CLAUDE.md"
+    , test "parseFzfItem fd unstaged" $
+        parseFzfItem "U\tfile.txt" == FdLine Unstaged "file.txt"
+    , test "parseFzfItem fd staged" $
+        parseFzfItem "S\tfile.txt" == FdLine Staged "file.txt"
+    , test "parseFzfItem fd untracked" $
+        parseFzfItem "?\tfile.txt" == FdLine Untracked "file.txt"
+    , test "parseFzfItem plain filename" $
+        parseFzfItem "CLAUDE.md" == FdLine Clean "CLAUDE.md"
+    , test "parseFzfItem fd with path" $
+        parseFzfItem " \tsrc/Foo/Bar.hs" == FdLine Clean "src/Foo/Bar.hs"
+    , test "parseFzfItem fd unknown status label" $ -- unrecognized labels fall through to Clean
+        parseFzfItem "X\tfile.txt" == FdLine Clean "file.txt"
+    , test "parseFzfItem bookmark file:line:col" $
+        parseFzfItem "src/Main.hs:843:9" == BookmarkLine "src/Main.hs" 843 9
+    , test "parseFzfItem bookmark file:line" $
+        parseFzfItem "src/Main.hs:843" == BookmarkLine "src/Main.hs" 843 1
+    , test "parseFzfItem bookmark with ANSI" $
+        parseFzfItem "\ESC[35msrc/Main.hs\ESC[0m:843:9" == BookmarkLine "src/Main.hs" 843 9
     ]
 
 -- ═══════════════════════════════════════════════════════════════════════
@@ -217,10 +252,14 @@ lineAccessorTests =
         lineFile (RgLine "src/Main.hs" 42 10) == "src/Main.hs"
     , test "lineFile FdLine" $
         lineFile (FdLine Clean "README.md") == "README.md"
+    , test "lineFile BookmarkLine" $
+        lineFile (BookmarkLine "src/Main.hs" 843 9) == "src/Main.hs"
     , test "lineRef RgLine" $
         lineRef (RgLine "src/Main.hs" 42 10) == "src/Main.hs:42:10"
     , test "lineRef FdLine" $
         lineRef (FdLine Unstaged "file.txt") == "file.txt"
+    , test "lineRef BookmarkLine" $
+        lineRef (BookmarkLine "src/Main.hs" 843 9) == "src/Main.hs:843:9"
     ]
 
 -- ═══════════════════════════════════════════════════════════════════════
