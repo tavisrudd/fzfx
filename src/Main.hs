@@ -334,16 +334,15 @@ batHighlight file ln extraArgs =
 
 cmdPreview :: [Text] -> IO ()
 cmdPreview args = withCfg $ \Config{..} -> do
-    rows <- maybe 40 readInt <$> lookupEnv "FZF_PREVIEW_LINES"
     let item = fromMaybe "" (listToMaybe args)
         query = fromMaybe "" (listToMaybe (drop 1 args))
     if T.null (T.strip item)
         then case tryBookmark (stripAnsi query) of
-            Just (f, ln, _) -> highlightPreview rows f ln
+            Just (f, ln, _) -> highlightPreview f ln
             Nothing -> contentPreview (not (T.null cGit)) "."
         else case parseFzfItem item of
-            RgLine file ln _ -> highlightPreview rows file ln
-            BookmarkLine file ln _ -> highlightPreview rows file ln
+            RgLine file ln _ -> highlightPreview file ln
+            BookmarkLine file ln _ -> highlightPreview file ln
             FdLine st path
                 | cPreview == Diff
                 , st == Unstaged || st == Staged ->
@@ -352,11 +351,12 @@ cmdPreview args = withCfg $ \Config{..} -> do
                     showSymlink path
                     contentPreview (not (T.null cGit)) path
   where
-    readInt s = case reads s of [(n, _)] -> n; _ -> 40 :: Int
-    highlightPreview rows file ln = do
+    highlightPreview file ln = do
         showSymlink file
+        rows <- maybe 40 readInt <$> lookupEnv "FZF_PREVIEW_LINES"
         let start = max 1 (ln - rows `div` 2)
         batHighlight file ln ["--line-range", showT start <> ":"]
+    readInt s = case reads s of [(n, _)] -> n; _ -> 40 :: Int
 
 diffArgs :: GitStatus -> Text -> [Text]
 diffArgs st path = case st of
