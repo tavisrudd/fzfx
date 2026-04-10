@@ -1,4 +1,5 @@
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 
@@ -45,36 +46,38 @@ import System.Process.Typed hiding (setEnv)
 import Fzfx.Core
 
 dispatch :: Subcmd -> [String] -> IO ()
-dispatch sub rest = case sub of
-    SReload -> cmdReload (toArg rest)
-    SPreview -> cmdPreview (toArg rest)
-    STransform -> cmdTransform (toArg rest)
-    SToggle -> cmdToggle (toArg rest)
-    SNavigate -> case rest of
-        (a : l : q : _) -> cmdNavigate (T.pack a) (T.pack l) (T.pack q)
-        _ -> cmdNavigate "" "" ""
-    SEdit -> cmdEdit (toArg rest)
-    SMagit -> cmdMagit (toArg rest)
-    SForgit -> cmdForgit (toArg rest)
-    SCopy -> cmdCopy (toArg rest)
-    SDebug -> cmdDebug
-    SSwap -> cmdSwap (toArg rest)
-    SFullPreview -> cmdFullPreview (toArg rest)
-    SQueryPush -> cmdQueryPush (toArg rest)
-    SQueryPop -> cmdQueryPop
-    SQueryApply -> cmdQueryApply
-    SQueryDelete -> cmdQueryDelete (toArg rest)
-    SQueryList -> cmdQueryList
-    SSelSave -> cmdSelSave (toArg rest)
-    SSelRestore -> cmdSelRestore
-    SSmartEnter -> cmdSmartEnter (toArg rest)
-    SExtraArgs -> cmdExtraArgs (toArg rest)
-    SPreviewWidth -> cmdPreviewWidth
-    SZoxide -> cmdZoxide (toArg rest)
-    STokei -> cmdTokei (toArg rest)
-    SHeightToggle -> cmdHeightToggle (toArg rest)
+dispatch sub rest = cmdFor sub (map T.pack rest)
+
+cmdFor :: Subcmd -> [Text] -> IO ()
+cmdFor = \case
+    SReload -> one cmdReload
+    SPreview -> one cmdPreview
+    STransform -> one cmdTransform
+    SToggle -> one cmdToggle
+    SNavigate -> cmdNavigate
+    SEdit -> one cmdEdit
+    SMagit -> one cmdMagit
+    SForgit -> one cmdForgit
+    SCopy -> one cmdCopy
+    SDebug -> none cmdDebug
+    SSwap -> one cmdSwap
+    SFullPreview -> one cmdFullPreview
+    SQueryPush -> one cmdQueryPush
+    SQueryPop -> none cmdQueryPop
+    SQueryApply -> none cmdQueryApply
+    SQueryDelete -> one cmdQueryDelete
+    SQueryList -> none cmdQueryList
+    SSelSave -> one cmdSelSave
+    SSelRestore -> none cmdSelRestore
+    SSmartEnter -> one cmdSmartEnter
+    SExtraArgs -> one cmdExtraArgs
+    SPreviewWidth -> none cmdPreviewWidth
+    SZoxide -> one cmdZoxide
+    STokei -> one cmdTokei
+    SHeightToggle -> one cmdHeightToggle
   where
-    toArg = T.pack . unwords
+    one f = f . T.unwords
+    none f _ = f
 
 saveConfig :: Config -> IO ()
 saveConfig c = do
@@ -190,23 +193,21 @@ reloadFiles Config{..} query = do
                 tr <- Set.fromList . map (pfx <>) . filter (not . T.null) . T.lines <$> readProc "git" ["ls-files", "--others", "--exclude-standard"]
                 let classifyFile f =
                         let rp = pfx <> f
-                         in case () of
-                                _
-                                    | Set.member rp u -> Unstaged
-                                    | Set.member rp s -> Staged
-                                    | Set.member rp tr -> Untracked
-                                    | otherwise -> Clean
+                         in if
+                                | Set.member rp u -> Unstaged
+                                | Set.member rp s -> Staged
+                                | Set.member rp tr -> Untracked
+                                | otherwise -> Clean
                     anyUnder st dir' =
                         let d = T.dropWhileEnd (== '/') dir'
                             dp = pfx <> d <> "/"
                          in any (dp `T.isPrefixOf`) (Set.toList st)
                     classifyDir d =
-                        case () of
-                            _
-                                | anyUnder u d -> Unstaged
-                                | anyUnder s d -> Staged
-                                | anyUnder tr d -> Untracked
-                                | otherwise -> Clean
+                        if
+                            | anyUnder u d -> Unstaged
+                            | anyUnder s d -> Staged
+                            | anyUnder tr d -> Untracked
+                            | otherwise -> Clean
                     classify f = case cFd of
                         FdDirs -> classifyDir f
                         FdFiles -> classifyFile f
@@ -247,28 +248,22 @@ reloadFiles Config{..} query = do
 
 loadFzfxInclude :: [Text] -> IO [Text]
 loadFzfxInclude tyArgs = do
-    let includeFile = ".fzfxinclude"
-    exists <- doesFileExist includeFile
+    exists <- doesFileExist ".fzfxinclude"
     if not exists
         then pure []
         else do
-            content <- T.pack <$> readFile' includeFile
+            content <- T.pack <$> readFile' ".fzfxinclude"
             let paths = filter (\l -> not (T.null l) && not ("#" `T.isPrefixOf` l)) $ map T.strip $ T.lines content
             if null paths
                 then pure []
                 else do
-                    let fa =
+                    let args =
                             tyArgs
-                                <> [ "--no-ignore"
-                                   , "--hidden"
-                                   , "-L"
-                                   , "--exclude"
-                                   , ".git"
-                                   ]
+                                <> ["--no-ignore", "--hidden", "-L", "--exclude", ".git"]
                                 <> concatMap (\p -> ["--search-path", p]) paths
-                    let strip f = fromMaybe f (T.stripPrefix "./" f)
+                        strip f = fromMaybe f (T.stripPrefix "./" f)
                     catch
-                        (map strip . filter (not . T.null) . T.lines <$> readProc "fd" fa)
+                        (map strip . filter (not . T.null) . T.lines <$> readProc "fd" args)
                         (\(_ :: IOException) -> pure [])
 
 reloadRgLive :: Text -> [Text] -> IO ()
@@ -279,6 +274,15 @@ reloadRgLive pat ex = unless (T.null pat) $ do
                 <> ["--", pat]
     runProcess_ $ setStdout inherit $ setStderr nullStream $ proc (t "rg") (map t args)
 
+-- | Filter a list of lines through fzf --filter (identity when filter is empty)
+fzfFilter :: Text -> [Text] -> IO [Text]
+fzfFilter filt xs
+    | T.null filt = pure xs
+    | otherwise = do
+        let input = LBS.fromStrict $ TE.encodeUtf8 $ T.unlines xs
+        (_, out, _) <- readProcess $ setStdin (byteStringInput input) $ proc "fzf" ["--filter", t filt]
+        pure $ filter (not . T.null) $ T.lines $ decodeOut out
+
 reloadRgLocked :: Text -> Text -> [Text] -> IO ()
 reloadRgLocked pat filt ex = unless (T.null pat) $ do
     let rgArgs =
@@ -286,31 +290,14 @@ reloadRgLocked pat filt ex = unless (T.null pat) $ do
                 <> ex
                 <> ["--", pat]
     out <- catch (readProc "rg" rgArgs) (\(_ :: IOException) -> pure "")
-    let files = filter (not . T.null) (T.lines out)
-    filtered <-
-        if T.null filt
-            then pure files
-            else do
-                let input = LBS.fromStrict $ TE.encodeUtf8 $ T.unlines files
-                (_, fout, _) <- readProcess (setStdin (byteStringInput input) $ proc "fzf" ["--filter", t filt])
-                let fout' = decodeOut fout
-                pure $ filter (not . T.null) (T.lines fout')
+    filtered <- fzfFilter filt $ filter (not . T.null) (T.lines out)
     mapM_ (\f -> TIO.putStrLn (" \t" <> f)) filtered
     hFlush stdout
 
 reloadFzfRg :: Text -> Text -> [Text] -> IO ()
 reloadFzfRg filt rgPat ex = unless (T.null rgPat) $ do
-    -- Get all files, filter with fzf, then rg within matches
     fdOut <- readProc "fd" ["--type", "f", "--exclude", ".git", "--exclude", "node_modules", "--strip-cwd-prefix"]
-    let allFiles = filter (not . T.null) (T.lines fdOut)
-    targets <-
-        if T.null filt
-            then pure allFiles
-            else do
-                let input = LBS.fromStrict $ TE.encodeUtf8 $ T.unlines allFiles
-                (_, fout, _) <- readProcess (setStdin (byteStringInput input) $ proc "fzf" ["--filter", t filt])
-                let fout' = decodeOut fout
-                pure $ filter (not . T.null) (T.lines fout')
+    targets <- fzfFilter filt $ filter (not . T.null) (T.lines fdOut)
     unless (null targets) $ do
         let rgArgs =
                 ["--with-filename", "--column", "--line-number", "--no-heading", "--color=always", "--smart-case"]
@@ -322,15 +309,7 @@ reloadFzfRg filt rgPat ex = unless (T.null rgPat) $ do
 reloadFzfRgPending :: Text -> IO ()
 reloadFzfRgPending filt = do
     fdOut <- readProc "fd" ["--type", "f", "--exclude", ".git", "--exclude", "node_modules", "--strip-cwd-prefix"]
-    let allFiles = filter (not . T.null) (T.lines fdOut)
-    filtered <-
-        if T.null filt
-            then pure allFiles
-            else do
-                let input = LBS.fromStrict $ TE.encodeUtf8 $ T.unlines allFiles
-                (_, fout, _) <- readProcess (setStdin (byteStringInput input) $ proc "fzf" ["--filter", t filt])
-                let fout' = decodeOut fout
-                pure $ filter (not . T.null) (T.lines fout')
+    filtered <- fzfFilter filt $ filter (not . T.null) (T.lines fdOut)
     mapM_ (\f -> TIO.putStrLn (" \t" <> f)) filtered
     hFlush stdout
 
@@ -391,8 +370,10 @@ contentPreview inGit path = do
             exec "eza" (ezaTreeArgs inGit p)
         else
             if takeExtension (t path) == ".ipynb"
-                then exec "nbpreview" [path]
-                else exec "bat" [path, "--style=plain", "--color=always", "--line-range", "0:100"]
+                then
+                    exec "nbpreview" [path]
+                else
+                    exec "bat" [path, "--style=plain", "--color=always", "--line-range", "0:100"]
 
 cmdFullPreview :: Text -> IO ()
 cmdFullPreview line = withCfg $ \Config{..} -> do
@@ -562,9 +543,13 @@ cmdSmartEnter args = do
 cmdEdit :: Text -> IO ()
 cmdEdit line = withCfg $ \_ -> do
     reopenTty
+    editorWords <- T.words <$> envOrM "FZFX_EDITOR" (envOr "EDITOR" "nano")
+    let (cmd, edArgs) = case editorWords of
+            (c : a) -> (t c, map t a)
+            [] -> ("nano", [])
     case parseLine line of
-        RgLine f ln col -> executeFile "tr-edit" True [t ("+" <> showT ln <> ":" <> showT col), t f] Nothing
-        FdLine _ p -> executeFile "tr-edit" True [t p] Nothing
+        RgLine f ln col -> executeFile cmd True (edArgs <> [t ("+" <> showT ln <> ":" <> showT col), t f]) Nothing
+        FdLine _ p -> executeFile cmd True (edArgs <> [t p]) Nothing
 
 {- | Restore stdin/stdout to the terminal for become: handlers.
 fzfx pipes fzf's stdin (reload data) and stdout (selection capture),
@@ -631,38 +616,24 @@ cmdPreviewWidth = withCfg $ \Config{..} -> do
     exists <- doesFileExist widthFile
     when exists $ do
         content <- readFile' widthFile
-        let maxW = case reads content of [(n, _)] -> n; _ -> 0 :: Int
-            readInt' s = case reads s of [(n, _)] -> n; _ -> 0 :: Int
+        let maxW = readInt 0 content
         case cPreviewLayout of
             PreviewRight -> do
-                fzfCols <- lookupEnv "FZF_COLUMNS"
-                stdCols <- lookupEnv "COLUMNS"
-                let termW = case fzfCols of
-                        Just s | readInt' s > 0 -> readInt' s
-                        _ -> case stdCols of
-                            Just s | readInt' s > 0 -> readInt' s
-                            _ -> 120
-                    listNeed = maxW + 4
-                    prevPct = max 50 (((termW - listNeed) * 100) `div` termW)
+                termW <- envInt "FZF_COLUMNS" =<< envInt "COLUMNS" 120
+                let prevPct = max 50 (((termW - maxW - 4) * 100) `div` termW)
                 TIO.putStr $ "change-preview-window(right:" <> showT prevPct <> "%)"
             PreviewBottom -> do
-                let lcFile = t cDir </> "line-count"
-                lcExists <- doesFileExist lcFile
-                when lcExists $ do
-                    lcContent <- readFile' lcFile
-                    let lineCount = case reads lcContent of [(n, _)] -> n; _ -> 0 :: Int
-                    fzfLines <- lookupEnv "FZF_LINES"
-                    stdLines <- lookupEnv "LINES"
-                    let termH = case fzfLines of
-                            Just s | readInt' s > 0 -> readInt' s
-                            _ -> case stdLines of
-                                Just s | readInt' s > 0 -> readInt' s
-                                _ -> 40
-                        -- File list needs: results + header (~3 lines) + prompt
-                        listNeed = lineCount + 4
-                        prevPct = max 50 (((termH - listNeed) * 100) `div` termH)
-                    TIO.putStr $ "change-preview-window(bottom:" <> showT prevPct <> "%)"
+                lineCount <- catch (readInt 0 <$> readFile' (t cDir </> "line-count")) (\(_ :: IOException) -> pure 0)
+                termH <- envInt "FZF_LINES" =<< envInt "LINES" 40
+                let prevPct = max 50 (((termH - lineCount - 4) * 100) `div` termH)
+                TIO.putStr $ "change-preview-window(bottom:" <> showT prevPct <> "%)"
     hFlush stdout
+  where
+    readInt def s = case reads s of [(n, _)] -> n; _ -> def :: Int
+    envInt name def =
+        lookupEnv name >>= \case
+            Just s | readInt 0 s > 0 -> pure (readInt 0 s)
+            _ -> pure def
 
 cmdDebug :: IO ()
 cmdDebug = withCfg $ \cfg -> do
@@ -829,15 +800,18 @@ cmdToggle nameAndArgs = do
             "type_f" -> TgTypeF
             "type_mixed" -> TgTypeMixed
             "mixed" -> TgMixed
-            _ -> TgAtPrefix -- fallback, no-op if already matching
+            _ -> TgAtPrefix -- fallback, no-op if already matching -- TODO: wtf is this for?
         (cfg', actions) = transition cfg (EvToggle tgName curQ)
     unless (null actions) $ do
         saveConfig cfg'
         TIO.putStr (renderActions (filterPrompt cfg' actions))
         hFlush stdout
 
-cmdNavigate :: Text -> Text -> Text -> IO ()
-cmdNavigate navAction sel query = do
+cmdNavigate :: [Text] -> IO ()
+cmdNavigate args = do
+    let (navAction, sel, query) = case args of
+            (a : l : q : _) -> (a, l, q)
+            _ -> error $ "navigate: expected 3 args, got " <> show (length args)
     Config{..} <- loadConfig
     let sp = T.dropWhileEnd (== pathSeparator) $ lineFile (parseLine sel)
     nCwd <- case navAction of
@@ -939,6 +913,8 @@ relaunch Config{..} = do
     setEnv "_FZFX_DIR_QUERY" (t cDirQuery)
     setEnv "_FZFX_SAVED_FILE_SEL" (t (T.intercalate "\n" cSavedFileSel))
     setEnv "_FZFX_SAVED_DIR_SEL" (t (T.intercalate "\n" cSavedDirSel))
+    setEnv "_FZFX_OUTPUT_MODE" (case cOut of OTmux -> "tmux"; OStdout -> "stdout")
+    setEnv "_FZFX_PANE" (t cPane)
     setEnv "_FZFX_STATE_DIR" ""
     mainLaunch defaultRunOpts
 
@@ -1299,7 +1275,7 @@ keybindingsHelp =
     unlines
         [ "Keybindings:"
         , "  enter           select file(s) and output/insert"
-        , "  alt-enter       open in editor (tr-edit)"
+        , "  alt-enter       open in editor ($EDITOR)"
         , "  tab             toggle selection down"
         , "  shift-tab       toggle + clear line"
         , "  alt-3           switch to ripgrep mode"

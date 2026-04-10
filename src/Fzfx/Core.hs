@@ -61,8 +61,8 @@ module Fzfx.Core (
     t,
 ) where
 
+import Control.Monad (guard)
 import Data.ByteString.Lazy qualified as LBS
-import Data.Char (isDigit)
 import Data.List qualified as L
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -70,6 +70,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import System.FilePath (isAbsolute, pathSeparator, splitDirectories, (</>))
 import System.FilePath qualified as FP
+import Text.Read (readMaybe)
 
 -- ═══════════════════════════════════════════════════════════════════════
 -- Domain Types
@@ -291,33 +292,26 @@ parseLine raw = case tryRg (stripAnsi raw) of
 
 -- | Parse rg output: file:line:col:text
 tryRg :: Text -> Maybe (Text, Int, Int)
-tryRg s = case T.break (== ':') s of
-    (file, rest1)
-        | not (T.null file)
-        , Just r1 <- T.stripPrefix ":" rest1 ->
-            case T.break (== ':') r1 of
-                (lnS, rest2)
-                    | isAllDigit lnS
-                    , Just r2 <- T.stripPrefix ":" rest2 ->
-                        case T.break (== ':') r2 of
-                            (colS, rest3)
-                                | isAllDigit colS
-                                , not (T.null rest3) ->
-                                    Just (file, read (T.unpack lnS), read (T.unpack colS))
-                            _ -> Nothing
-                _ -> Nothing
-    _ -> Nothing
-  where
-    isAllDigit s' = not (T.null s') && T.all isDigit s'
+tryRg s = do
+    let (file, rest1) = T.break (== ':') s
+    guard (not (T.null file))
+    r1 <- T.stripPrefix ":" rest1
+    let (lnS, rest2) = T.break (== ':') r1
+    ln <- readMaybe (T.unpack lnS)
+    r2 <- T.stripPrefix ":" rest2
+    let (colS, rest3) = T.break (== ':') r2
+    col <- readMaybe (T.unpack colS)
+    guard (not (T.null rest3))
+    pure (file, ln, col)
 
 stripAnsi :: Text -> Text
-stripAnsi txt
-    | T.null txt = txt
-    | T.head txt == '\ESC' = case T.uncons (T.tail txt) of
-        Just ('[', rest) -> stripAnsi (T.drop 1 (T.dropWhile (\c -> c < '@' || c > '~') rest))
-        Just (_, rest) -> stripAnsi rest
+stripAnsi txt = case T.uncons txt of
+    Nothing -> txt
+    Just ('\ESC', rest) -> case T.uncons rest of
+        Just ('[', rest') -> stripAnsi (T.drop 1 (T.dropWhile (\c -> c < '@' || c > '~') rest'))
+        Just (_, rest') -> stripAnsi rest'
         Nothing -> txt
-    | otherwise = T.cons (T.head txt) (stripAnsi (T.tail txt))
+    Just (c, rest) -> T.cons c (stripAnsi rest)
 
 lineFile :: LineInfo -> Text
 lineFile (RgLine f _ _) = f
