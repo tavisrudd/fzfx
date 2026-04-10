@@ -8,7 +8,6 @@ module Fzfx.Core (
     GitStatus (..),
     FdType (..),
     defaultFdType,
-    fdTypeEnv,
     PreviewMode (..),
     PreviewLayout (..),
     OutMode (..),
@@ -92,11 +91,6 @@ data FdType = FdFiles | FdDirs | FdMixed
 
 defaultFdType :: FdType
 defaultFdType = FdMixed
-
-fdTypeEnv :: FdType -> Text
-fdTypeEnv FdFiles = "f"
-fdTypeEnv FdDirs = "d"
-fdTypeEnv FdMixed = "m"
 
 data PreviewMode = Content | Diff
     deriving (Eq, Read, Show)
@@ -209,7 +203,7 @@ data Config = Config
     , cPrompt :: !Text -- custom prompt override (empty = default)
     , cMixed :: !Bool -- mixed mode preference (files+dirs together)
     }
-    deriving (Eq, Read, Show)
+    deriving (Eq, Read, Show) -- Read/Show is fine: state dirs are ephemeral per-session, never shared between versions
 
 cfgPath :: Text -> FilePath
 cfgPath d = T.unpack d </> "cfg"

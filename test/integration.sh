@@ -52,9 +52,7 @@ setup_test_dir() {
 launch_fzfx() {
     $TSRV kill-server 2>/dev/null || true
     $TSRV new-session -d -s test -x 220 -y 40 \
-        -e "_FZFX_OUTPUT_MODE=stdout" \
-        -e "_FZFX_CWD=$TEST_DIR" \
-        "$FZFX" "$@"
+        "$FZFX" --output stdout --cwd "$TEST_DIR" "$@"
     # Give fzfx time to start and render
     sleep 1.2
 }

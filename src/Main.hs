@@ -34,9 +34,10 @@ import System.Directory (
  )
 import System.Environment (getArgs, getExecutablePath, lookupEnv, setEnv)
 
+import System.Exit (exitFailure)
 import System.FilePath (isAbsolute, pathSeparator, splitDirectories, takeDirectory, takeExtension, (</>))
 import System.FilePath qualified as FP
-import System.IO (hFlush, readFile', stdout)
+import System.IO (hFlush, hPutStrLn, readFile', stderr, stdout)
 import System.Posix.IO (OpenMode (ReadWrite), closeFd, defaultFileFlags, dupTo, fdWrite, openFd, stdError, stdInput, stdOutput)
 import System.Posix.IO.ByteString qualified as BSIO
 import System.Posix.Process (executeFile, getProcessID)
@@ -109,6 +110,12 @@ getStateDir =
     lookupEnv "_FZFX_STATE_DIR" >>= \case
         Just d | not (null d) -> pure (T.pack d)
         _ -> error "_FZFX_STATE_DIR not set"
+
+-- | Guard against removeDirectoryRecursive on a non-fzfx path.
+isFzfxTmpDir :: FilePath -> Bool
+isFzfxTmpDir p =
+    let base = FP.takeFileName p
+     in "fzfx-" `L.isPrefixOf` base && all (`elem` ("0123456789" :: String)) (drop 5 base)
 
 -- ═══════════════════════════════════════════════════════════════════════
 -- Utilities
@@ -947,37 +954,23 @@ cmdZoxide _query = do
                 relaunch Config{cCwd = nCwd, cQuery = "", cFd = defaultFdType, cFileQuery = "", cDirQuery = "", cSavedFileSel = [], cSavedDirSel = [], ..}
         _ -> pure ()
 
-{- | Set relaunch env vars from config and start a new fzf instance.
+{- | Save updated config and start a new fzf instance.
 Callers override specific fields via record update before passing.
+State is threaded entirely through the config file — _FZFX_STATE_DIR
+(already set) tells mainLaunch to load from file instead of env vars.
 -}
 relaunch :: Config -> IO ()
-relaunch Config{..} = do
-    setEnv "_FZFX_CWD" (t cCwd)
-    setEnv "_FZFX_QUERY" (t cQuery)
-    setEnv "_FZFX_AT_PREFIX" (if cAt then "1" else "0")
-    setEnv "_FZFX_FDTYPE" (t $ fdTypeEnv cFd)
-    setEnv "_FZFX_HIDDEN" (if cHid then "--hidden" else "")
-    setEnv "_FZFX_NO_IGNORE" (if cIgn then "1" else "0")
-    setEnv "_FZFX_GIT_STATUS" (if cGitSt then "1" else "0")
-    setEnv "_FZFX_PREV_MODE" (if cPreview == Diff then "diff" else "content")
-    setEnv "_FZFX_PREVIEW" (if cPreviewOn then "1" else "0")
-    setEnv "_FZFX_PREVIEW_LAYOUT" (case cPreviewLayout of PreviewRight -> "right"; PreviewBottom -> "bottom")
-    setEnv "_FZFX_HEIGHT" (t cHeight)
-    setEnv "_FZFX_PROMPT" (t cPrompt)
-    setEnv "_FZFX_MIXED" (if cMixed then "1" else "0")
-    setEnv "_FZFX_FILE_QUERY" (t cFileQuery)
-    setEnv "_FZFX_DIR_QUERY" (t cDirQuery)
-    setEnv "_FZFX_SAVED_FILE_SEL" (t (T.intercalate "\n" cSavedFileSel))
-    setEnv "_FZFX_SAVED_DIR_SEL" (t (T.intercalate "\n" cSavedDirSel))
-    setEnv "_FZFX_OUTPUT_MODE" (case cOut of OTmux -> "tmux"; OStdout -> "stdout")
-    setEnv "_FZFX_PANE" (t cPane)
-    setEnv "_FZFX_STATE_DIR" ""
+relaunch cfg = do
+    git <- detectGit (cCwd cfg)
+    self <- T.pack <$> getExecutablePath
+    saveConfig cfg{cGit = git, cSelf = self}
     mainLaunch defaultRunOpts
 
 cmdHeightToggle :: Text -> IO ()
 cmdHeightToggle query = do
     cfg@Config{..} <- loadConfig
-    relaunch cfg{cQuery = query, cHeight = if cHeightAuto then "100%" else "auto"}
+    let toAuto = not cHeightAuto
+    relaunch cfg{cQuery = query, cHeight = if toAuto then "auto" else "100%", cHeightAuto = toAuto}
 
 detectGit :: Text -> IO Text
 detectGit dir = do
@@ -1089,7 +1082,7 @@ fzfArgs cfg@Config{..} = baseOpts <> selfBindings <> staticBindings
                ]
     selfBindings =
         [ xf cfg "change" STransform "{q}"
-        , xf cfg "alt-a" SToggle "at_prefix"
+        , xf cfg "alt-@" SToggle "at_prefix"
         , xe cfg "alt-/" SFullPreview "{}" ""
         , xf cfg "alt-g" SToggle "git_status"
         , bind "alt-u" (statusToggle "U")
@@ -1197,7 +1190,7 @@ data RunOpts = RunOpts
     , optQuery :: ![Text]
     }
 
--- | All-default opts for internal re-launch (state comes from env vars)
+-- | All-default opts for internal re-launch (state comes from config file)
 defaultRunOpts :: RunOpts
 defaultRunOpts =
     RunOpts
@@ -1312,10 +1305,9 @@ runOptsParser =
         <*> optional
             ( T.pack
                 <$> strOption
-                    ( long "pane"
-                        <> short 'p'
+                    ( long "tmux-target-pane"
                         <> metavar "PANE"
-                        <> help "Tmux target pane"
+                        <> help "Tmux pane to send results to (e.g. %1). Required with --output tmux when called from outside a tmux session"
                     )
             )
         <*> many
@@ -1335,7 +1327,7 @@ keybindingsHelp =
         , "  tab             toggle selection down"
         , "  shift-tab       toggle + clear line"
         , "  alt-3           switch to ripgrep mode"
-        , "  alt-a           toggle @ prefix on output"
+        , "  alt-@           toggle @ prefix on output"
         , "  alt-r           swap query/results"
         , "  alt-/           full-screen preview in less"
         , "  alt-g           toggle git status filter"
@@ -1379,31 +1371,6 @@ keybindingsHelp =
         , "  #<pat>#<filter> ripgrep then filter results"
         , "  \\#<text>        literal # in file search"
         , ""
-        , "Environment (overridden by flags):"
-        , "  _FZFX_CWD             starting directory      (--cwd)"
-        , "  _FZFX_OUTPUT_MODE     output mode             (--output)"
-        , "  _FZFX_FDTYPE          file type filter        (--type)"
-        , "  _FZFX_HIDDEN          show hidden files       (--hidden)"
-        , "  _FZFX_PANE            tmux target pane        (--pane)"
-        , "  _FZFX_ORIG_CWD        original cwd            (toggle_root)"
-        , "  _FZFX_QUERY           initial query"
-        , "  _FZFX_AT_PREFIX       @ prefix (0/1)          (--at-prefix)"
-        , "  _FZFX_GIT_STATUS      git status filter (0/1) (--git-status)"
-        , "  _FZFX_PREVIEW         preview on/off (0/1)    (--preview/--no-preview)"
-        , "  _FZFX_PREVIEW_LAYOUT  preview position        (--preview-layout)"
-        , "  _FZFX_HEIGHT          fzf height              (--height)"
-        , ""
-        , "Internal (set automatically during re-launch):"
-        , "  _FZFX_STATE_DIR       temp state directory"
-        , "  _FZFX_FILE_QUERY      saved file-mode query"
-        , "  _FZFX_DIR_QUERY       saved dir-mode query"
-        , "  _FZFX_SAVED_FILE_SEL  saved file selections"
-        , "  _FZFX_SAVED_DIR_SEL   saved dir selections"
-        , "  _FZFX_NO_IGNORE       no-ignore state (0/1)"
-        , "  _FZFX_PREV_MODE       preview mode (diff/content)"
-        , "  _FZFX_PROMPT          custom prompt"
-        , "  _FZFX_MIXED           mixed mode pref (0/1)"
-        , ""
         , "Config:"
         , "  ~/.fzfx-git-ignore   skip git ops for listed repo paths"
         ]
@@ -1428,172 +1395,160 @@ main = do
         _ -> mainLaunch =<< execParser optsInfo
 
 mainLaunch :: RunOpts -> IO ()
-mainLaunch RunOpts{..} = do
+mainLaunch opts =
+    lookupEnv "_FZFX_STATE_DIR" >>= \case
+        Just sd | not (null sd) -> do
+            -- Relaunch: config was saved by `relaunch`, load and run
+            cfg <- loadConfig
+            setCurrentDirectory (t (cCwd cfg))
+            -- Resolve "auto" height (needs terminal dimensions at launch time)
+            cfg' <-
+                if cHeightAuto cfg
+                    then do
+                        (h, mh) <- resolveAutoHeight
+                        pure cfg{cHeight = h, cMinHeight = mh}
+                    else pure cfg
+            launchFzf cfg'
+        _ -> firstLaunch opts
+
+firstLaunch :: RunOpts -> IO ()
+firstLaunch opts = do
+    cfg <- buildConfig opts
+    setCurrentDirectory (t (cCwd cfg))
+    let sd = cDir cfg
+    bracket
+        (saveConfig cfg >> pure sd)
+        ( \d ->
+            when (isFzfxTmpDir (t d)) $
+                catch (removeDirectoryRecursive (t d)) (\(_ :: IOException) -> pure ())
+        )
+        $ \_ -> do
+            setEnv "_FZFX_STATE_DIR" (t sd)
+            launchFzf cfg
+
+buildConfig :: RunOpts -> IO Config
+buildConfig RunOpts{..} = do
     self <- T.pack <$> getExecutablePath
     cwd <- case optCwd of
         Just d -> pure d
-        Nothing -> envOrM "_FZFX_CWD" (T.pack <$> getCurrentDirectory)
-    orig <- envOr "_FZFX_ORIG_CWD" cwd
-    inTmux <- maybe False (not . null) <$> lookupEnv "TMUX"
-    pane <- case optPane of
-        Just p -> pure p
-        Nothing ->
-            if not inTmux
-                then pure ""
-                else
-                    lookupEnv "_FZFX_PANE" >>= \case
-                        Just p | not (null p) -> pure (T.pack p)
-                        _ ->
-                            lookupEnv "TMUX_TARGET_PANE" >>= \case
-                                Just p | not (null p) -> pure (T.pack p)
-                                _ -> fromMaybe "" <$> readProcMaybe "tmux" ["display-message", "-p", "#{pane_id}"]
-    om <- case optOutput of
-        Just m -> pure m
-        Nothing -> do
-            omEnv <- envOr "_FZFX_OUTPUT_MODE" ""
-            pure $ case omEnv of
-                "stdout" -> OStdout
-                "tmux" -> OTmux
-                _ -> OStdout
+        Nothing -> T.pack <$> getCurrentDirectory
+    (pane, paneTty) <- resolveTmuxPaneAndTty optPane
+    let om = fromMaybe OStdout optOutput
+    when (om == OTmux && T.null pane) $ do
+        hPutStrLn stderr "fzfx: --output tmux requires --tmux-target-pane or a tmux session"
+        exitFailure
     at <-
         if optAtPrefix
             then pure True
-            else (== "1") <$> envOr "_FZFX_AT_PREFIX" "0"
-    fd <- case optType of
-        Just ty -> pure ty
-        Nothing -> (\case "d" -> FdDirs; "f" -> FdFiles; "m" -> FdMixed; _ -> defaultFdType) <$> envOr "_FZFX_FDTYPE" ""
-    hid <-
-        if optHidden
-            then pure True
-            else T.isInfixOf "--hidden" <$> envOr "_FZFX_HIDDEN" ""
-    ign <- (== "1") <$> envOr "_FZFX_NO_IGNORE" "0"
-    gitSt <-
-        if optGitStatus
-            then pure True
-            else (== "1") <$> envOr "_FZFX_GIT_STATUS" "0"
-    prevMode <- do
-        env <- envOr "_FZFX_PREV_MODE" ""
-        pure $ case env of
-            "diff" -> Diff
-            "content" -> Content
-            _ -> if gitSt then Diff else Content
-    previewOn <- case optPreview of
-        Just v -> pure v
-        Nothing -> (/= "0") <$> envOr "_FZFX_PREVIEW" "1"
-    previewLayout <- case optPreviewLayout of
-        Just lay -> pure lay
-        Nothing -> do
-            env <- envOr "_FZFX_PREVIEW_LAYOUT" ""
-            pure $ case env of
-                "bottom" -> PreviewBottom
-                _ -> PreviewRight
-    heightRaw <- case optHeight of
-        Just h -> pure h
-        Nothing -> envOr "_FZFX_HEIGHT" "100%"
-    prompt <- case optPrompt of
-        Just p -> pure p
-        Nothing -> envOr "_FZFX_PROMPT" ""
-    mixed <- (== "1") <$> envOr "_FZFX_MIXED" "0"
-    let heightAuto = heightRaw == "auto"
+            else
+                if om == OTmux && not (T.null pane)
+                    then catch (detectAi paneTty) (\(_ :: IOException) -> pure False)
+                    else pure False
+    let fd = fromMaybe defaultFdType optType
+        gitSt = optGitStatus
+        heightRaw = fromMaybe "100%" optHeight
+        heightAuto = heightRaw == "auto"
+        q = T.unwords optQuery
     (height, minHeight) <-
         if heightAuto
             then resolveAutoHeight
             else pure (heightRaw, 0)
-    q <-
-        lookupEnv "_FZFX_QUERY" >>= \case
-            Just v | not (null v) -> pure (T.pack v)
-            _ -> pure (T.unwords optQuery)
     git <- detectGit cwd
-
-    at' <-
-        if not at && om == OTmux && not (T.null pane)
-            then catch (detectAi pane) (\(_ :: IOException) -> pure False)
-            else pure at
-
     tmp <- getTemporaryDirectory
     pid <- getProcessID
-    fqEnv <- envOr "_FZFX_FILE_QUERY" ""
-    dqEnv <- envOr "_FZFX_DIR_QUERY" ""
-    fSelEnv <- envOr "_FZFX_SAVED_FILE_SEL" ""
-    dSelEnv <- envOr "_FZFX_SAVED_DIR_SEL" ""
-    let sd = T.pack $ tmp </> "fzfx-" <> show pid
-        fq = if T.null fqEnv then (if fd `elem` [FdFiles, FdMixed] then q else "") else fqEnv
-        dq = if T.null dqEnv then (if fd == FdDirs then q else "") else dqEnv
-        fSel = if T.null fSelEnv then [] else filter (not . T.null) (T.lines fSelEnv)
-        dSel = if T.null dSelEnv then [] else filter (not . T.null) (T.lines dSelEnv)
     persistedStack <- loadQueryStack git
-    let cfg =
-            Config
-                { cDir = sd
-                , cGit = git
-                , cOrig = orig
-                , cCwd = cwd
-                , cPane = pane
-                , cSelf = self
-                , cQuery = q
-                , cOut = om
-                , cAt = at'
-                , cFd = fd
-                , cHid = hid
-                , cIgn = ign
-                , cPreview = prevMode
-                , cFileQuery = fq
-                , cDirQuery = dq
-                , cQueryStack = persistedStack
-                , cPendingQuery = ""
-                , cWasRg = False
-                , cSavedFileSel = fSel
-                , cSavedDirSel = dSel
-                , cGitSt = gitSt
-                , cPreviewOn = previewOn
-                , cPreviewLayout = previewLayout
-                , cHeight = height
-                , cHeightAuto = heightAuto
-                , cMinHeight = minHeight
-                , cPrompt = prompt
-                , cMixed = mixed || fd == FdMixed
-                }
+    pure
+        Config
+            { cDir = T.pack $ tmp </> "fzfx-" <> show pid
+            , cGit = git
+            , cOrig = cwd
+            , cCwd = cwd
+            , cPane = pane
+            , cSelf = self
+            , cQuery = q
+            , cOut = om
+            , cAt = at
+            , cFd = fd
+            , cHid = optHidden
+            , cIgn = False
+            , cPreview = if gitSt then Diff else Content
+            , cFileQuery = if fd `elem` [FdFiles, FdMixed] then q else ""
+            , cDirQuery = if fd == FdDirs then q else ""
+            , cQueryStack = persistedStack
+            , cPendingQuery = ""
+            , cWasRg = False
+            , cSavedFileSel = []
+            , cSavedDirSel = []
+            , cGitSt = gitSt
+            , cPreviewOn = fromMaybe True optPreview
+            , cPreviewLayout = fromMaybe PreviewRight optPreviewLayout
+            , cHeight = height
+            , cHeightAuto = heightAuto
+            , cMinHeight = minHeight
+            , cPrompt = fromMaybe "" optPrompt
+            , cMixed = fd == FdMixed
+            }
 
-    setCurrentDirectory (t cwd)
-    setEnv "_FZFX_ORIG_CWD" (t orig)
-
-    bracket
-        (saveConfig cfg >> pure sd)
-        (\d -> catch (removeDirectoryRecursive (t d)) (\(_ :: IOException) -> pure ()))
-        $ \_ -> do
-            setEnv "_FZFX_STATE_DIR" (t sd)
-            -- Pipe reload output into fzf's stdin (fzf needs real tty on stderr)
-            let reloadProc =
+-- | Pipe reload into fzf, wait for selection, output results.
+launchFzf :: Config -> IO ()
+launchFzf cfg = do
+    let self = cSelf cfg
+        q = cQuery cfg
+        reloadProc =
+            setStdout createPipe $
+                proc (t self) [t (flg SReload), t q]
+        fzfCmd = map t (fzfArgs cfg)
+    -- reload feeds fzf's stdin; when fzf exits (abort, become:, selection)
+    -- the pipe breaks and reload gets SIGPIPE — ignore its exit code.
+    withProcessWait reloadProc $ \reloadP -> do
+        let fzfProc =
+                setStdin (useHandleOpen (getStdout reloadP)) $
                     setStdout createPipe $
-                        proc (t self) [t (flg SReload), t q]
-                fzfCmd = map t (fzfArgs cfg)
-            withProcessWait_ reloadProc $ \reloadP -> do
-                let fzfProc =
-                        setStdin (useHandleOpen (getStdout reloadP)) $
-                            setStdout createPipe $
-                                proc (t "fzf") fzfCmd
-                withProcessWait fzfProc $ \p -> do
-                    out <- LBS.hGetContents (getStdout p)
-                    ec <- waitExitCode p
-                    case ec of
-                        ExitSuccess -> do
-                            let selected = filter (not . T.null) (T.lines (decodeOut out))
-                            unless (null selected) $ do
-                                c <- loadConfig
-                                outputResults c selected
-                        _ -> pure () -- treat abort/ctrl-c as success
+                        proc (t "fzf") fzfCmd
+        withProcessWait fzfProc $ \p -> do
+            out <- LBS.hGetContents (getStdout p)
+            fzfEc <- waitExitCode p
+            void $ waitExitCode reloadP
+            case fzfEc of
+                ExitSuccess -> do
+                    let selected = filter (not . T.null) (T.lines (decodeOut out))
+                    unless (null selected) $ do
+                        c <- loadConfig
+                        outputResults c selected
+                _ -> pure ()
 
-detectAi :: Text -> IO Bool
-detectAi pane = do
-    tty <- readProcMaybe "tmux" ["display-message", "-t", pane, "-p", "#{pane_tty}"]
-    case tty of
-        Nothing -> pure False
-        Just tty' -> do
-            (ec, out, _) <- readProcess $ proc "ps" ["-t", t tty', "-o", "comm=,args="]
-            let keywords = ["claude", "codex", "gemini"]
-            pure $ case ec of
-                ExitSuccess ->
-                    any
-                        (\p -> any (`T.isInfixOf` p) keywords)
-                        (filter (not . T.null) (T.lines (decodeOut out)))
-                _ -> False
+{- | Resolve tmux pane id and tty. Fetches both in a single tmux call
+when auto-detecting; uses a targeted query for explicit pane ids.
+-}
+resolveTmuxPaneAndTty :: Maybe Text -> IO (Text, Maybe Text)
+resolveTmuxPaneAndTty optPane = do
+    inTmux <- maybe False (not . null) <$> lookupEnv "TMUX"
+    case optPane of
+        Just p -> do
+            tty <- if inTmux then readProcMaybe "tmux" ["display-message", "-t", p, "-p", "#{pane_tty}"] else pure Nothing
+            pure (p, tty)
+        Nothing ->
+            if not inTmux
+                then pure ("", Nothing)
+                else do
+                    out <- readProcMaybe "tmux" ["display-message", "-p", "#{pane_id}\t#{pane_tty}"]
+                    pure $ case out of
+                        Just txt
+                            | (pid', tty) <- T.breakOn "\t" txt
+                            , not (T.null pid') ->
+                                (pid', if T.length tty > 1 then Just (T.drop 1 tty) else Nothing)
+                        _ -> ("", Nothing)
+
+-- | Check if an AI agent is running in the given tty.
+detectAi :: Maybe Text -> IO Bool
+detectAi mTty = case mTty of
+    Nothing -> pure False
+    Just tty' -> do
+        (ec, out, _) <- readProcess $ proc "ps" ["-t", t tty', "-o", "comm=,args="]
+        let keywords = ["claude", "codex", "gemini"]
+        pure $ case ec of
+            ExitSuccess ->
+                any
+                    (\p -> any (`T.isInfixOf` p) keywords)
+                    (filter (not . T.null) (T.lines (decodeOut out)))
+            _ -> False
