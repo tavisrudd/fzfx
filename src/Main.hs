@@ -12,7 +12,7 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.Char (chr)
 import Data.List (partition, sort)
 import Data.List qualified as L
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -52,7 +52,7 @@ dispatch sub rest = cmdFor sub (map T.pack rest)
 cmdFor :: Subcmd -> [Text] -> IO ()
 cmdFor = \case
     SReload -> one cmdReload
-    SPreview -> one cmdPreview
+    SPreview -> cmdPreview
     STransform -> one cmdTransform
     SToggle -> one cmdToggle
     SNavigate -> cmdNavigate
@@ -332,12 +332,16 @@ batHighlight :: Text -> Int -> [Text] -> IO ()
 batHighlight file ln extraArgs =
     exec "bat" $ ["--color=always", "--style=numbers", "--highlight-line", showT ln] <> extraArgs <> ["--", file]
 
-cmdPreview :: Text -> IO ()
-cmdPreview line = withCfg $ \Config{..} -> do
+cmdPreview :: [Text] -> IO ()
+cmdPreview args = withCfg $ \Config{..} -> do
     rows <- maybe 40 readInt <$> lookupEnv "FZF_PREVIEW_LINES"
-    if T.null (T.strip line)
-        then contentPreview (not (T.null cGit)) "."
-        else case parseFzfItem line of
+    let item = fromMaybe "" (listToMaybe args)
+        query = fromMaybe "" (listToMaybe (drop 1 args))
+    if T.null (T.strip item)
+        then case tryBookmark (stripAnsi query) of
+            Just (f, ln, _) -> highlightPreview rows f ln
+            Nothing -> contentPreview (not (T.null cGit)) "."
+        else case parseFzfItem item of
             RgLine file ln _ -> highlightPreview rows file ln
             BookmarkLine file ln _ -> highlightPreview rows file ln
             FdLine st path
@@ -1021,6 +1025,9 @@ isGitIgnored dir = do
 -- ═══════════════════════════════════════════════════════════════════════
 -- FZF Argument Building
 -- ═══════════════════════════════════════════════════════════════════════
+-- NOTE: fzf auto-quotes placeholder expressions ({}, {q}, {+}, etc.)
+-- for safe shell passing. Do NOT manually quote them — that causes
+-- double-quoting. See `man fzf` under "placeholder".
 
 bind :: Text -> Text -> Text
 bind key act = "--bind=" <> key <> ":" <> act
@@ -1087,7 +1094,7 @@ fzfArgs cfg@Config{..} = baseOpts <> selfBindings <> staticBindings
         ]
             <> ["--min-height=" <> showT cMinHeight | cMinHeight > 0]
             <> [ "--query=" <> cQuery
-               , "--preview=" <> cSelf <> " " <> flg SPreview <> " {}"
+               , "--preview=" <> cSelf <> " " <> flg SPreview <> " {} {q}"
                , "--preview-window="
                     <> (case cPreviewLayout of PreviewRight -> "right"; PreviewBottom -> "bottom")
                     <> ":50%"
@@ -1145,7 +1152,7 @@ fzfArgs cfg@Config{..} = baseOpts <> selfBindings <> staticBindings
         , bind "ctrl-z" "abort"
         , xf cfg "f4" SQueryPush "{q}"
         , xe cfg "f3" SQueryPop "" ("+transform:" <> cSelf <> " " <> flg SQueryApply)
-        , bind "zero" ("preview(" <> cSelf <> " " <> flg SPreview <> ")")
+        , bind "zero" ("preview(" <> cSelf <> " " <> flg SPreview <> " '' {q})")
         , bind "result" ("transform:" <> cSelf <> " " <> flg SPreviewWidth)
         , bind "load" ("transform:" <> cSelf <> " " <> flg SSelRestore)
         ]
