@@ -5,6 +5,7 @@
 
 module Main (main) where
 
+import Control.Concurrent (threadDelay)
 import Control.Exception (IOException, bracket, bracket_, catch)
 import Control.Monad (unless, void, when)
 import Data.ByteString qualified as BS
@@ -1180,8 +1181,22 @@ outputResults Config{..} sel = do
     case cOut of
         OStdout -> mapM_ TIO.putStrLn files
         OTmux -> do
+            -- Exit copy-mode if the target pane is in it, so send-keys
+            -- reaches the underlying program rather than the copy cursor.
+            (_, modeOut, _) <- readProcess $ proc "tmux" (map t ["display-message", "-p", "-t", cPane, "#{pane_mode}"])
+            when (T.strip (decodeOut modeOut) == "copy-mode") $ do
+                void $ readProcess $ proc "tmux" (map t ["send-keys", "-t", cPane, "-X", "cancel"])
+                threadDelay 10000 -- 10ms for tmux to settle
             let pfx = if cAt then map ("@" <>) files else files
-                txt = T.unwords pfx <> " "
+                allMatch = not (T.null cStripPrefix) && all (T.isPrefixOf cStripPrefix) pfx
+            -- When prefix doesn't match output (fuzzy search expanded by fzf),
+            -- delete it from the pane before inserting the full result.
+            when (not (T.null cStripPrefix) && not allMatch) $
+                mapM_ (\_ -> tmuxSend ["BSpace"]) [1 .. T.length cStripPrefix]
+            let out
+                    | allMatch = map (\p -> fromMaybe p (T.stripPrefix cStripPrefix p)) pfx
+                    | otherwise = pfx
+                txt = T.unwords out <> " "
             tmuxSend ["-H", "1b", "5b", "32", "30", "30", "7e"]
             tmuxSend ["-l", txt]
             tmuxSend ["-H", "1b", "5b", "32", "30", "31", "7e"]
@@ -1201,13 +1216,14 @@ data RunOpts = RunOpts
     , optOutput :: !(Maybe OutMode)
     , optType :: !(Maybe FdType)
     , optHidden :: !Bool
-    , optAtPrefix :: !Bool
+    , optAtPrefix :: !(Maybe Bool)
     , optGitStatus :: !Bool
     , optPreview :: !(Maybe Bool)
     , optPreviewLayout :: !(Maybe PreviewLayout)
     , optHeight :: !(Maybe Text)
     , optPrompt :: !(Maybe Text)
     , optPane :: !(Maybe Text)
+    , optStripPrefix :: !(Maybe Text)
     , optQuery :: ![Text]
     }
 
@@ -1219,13 +1235,14 @@ defaultRunOpts =
         , optOutput = Nothing
         , optType = Nothing
         , optHidden = False
-        , optAtPrefix = False
+        , optAtPrefix = Nothing
         , optGitStatus = False
         , optPreview = Nothing
         , optPreviewLayout = Nothing
         , optHeight = Nothing
         , optPrompt = Nothing
         , optPane = Nothing
+        , optStripPrefix = Nothing
         , optQuery = []
         }
 
@@ -1286,9 +1303,9 @@ runOptsParser =
                 <> short 'H'
                 <> help "Show hidden files"
             )
-        <*> switch
-            ( long "at-prefix"
-                <> help "Prefix output with @"
+        <*> optional
+            ( flag' True (long "at-prefix" <> help "Prefix output with @")
+                <|> flag' False (long "no-at-prefix" <> help "Disable @ prefix (overrides auto-detection)")
             )
         <*> switch
             ( long "git-status"
@@ -1329,6 +1346,14 @@ runOptsParser =
                     ( long "tmux-target-pane"
                         <> metavar "PANE"
                         <> help "Tmux pane to send results to (e.g. %1). Required with --output tmux when called from outside a tmux session"
+                    )
+            )
+        <*> optional
+            ( T.pack
+                <$> strOption
+                    ( long "strip-prefix"
+                        <> metavar "PREFIX"
+                        <> help "Strip matching prefix from output paths (for completion)"
                     )
             )
         <*> many
@@ -1458,13 +1483,12 @@ buildConfig RunOpts{..} = do
     when (om == OTmux && T.null pane) $ do
         hPutStrLn stderr "fzfx: --output tmux requires --tmux-target-pane or a tmux session"
         exitFailure
-    at <-
-        if optAtPrefix
-            then pure True
-            else
-                if om == OTmux && not (T.null pane)
-                    then catch (detectAi paneTty) (\(_ :: IOException) -> pure False)
-                    else pure False
+    at <- case optAtPrefix of
+        Just v -> pure v
+        Nothing ->
+            if om == OTmux && not (T.null pane)
+                then catch (detectAi paneTty) (\(_ :: IOException) -> pure False)
+                else pure False
     let fd = fromMaybe defaultFdType optType
         gitSt = optGitStatus
         heightRaw = fromMaybe "100%" optHeight
@@ -1508,6 +1532,7 @@ buildConfig RunOpts{..} = do
             , cMinHeight = minHeight
             , cPrompt = fromMaybe "" optPrompt
             , cMixed = fd == FdMixed
+            , cStripPrefix = fromMaybe "" optStripPrefix
             }
 
 -- | Pipe reload into fzf, wait for selection, output results.

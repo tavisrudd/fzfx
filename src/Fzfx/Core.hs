@@ -204,6 +204,7 @@ data Config = Config
     , cMinHeight :: !Int -- fzf --min-height (0 = don't pass)
     , cPrompt :: !Text -- custom prompt override (empty = default)
     , cMixed :: !Bool -- mixed mode preference (files+dirs together)
+    , cStripPrefix :: !Text -- prefix to strip from output paths (for completion)
     }
     deriving (Eq, Read, Show) -- Read/Show is fine: state dirs are ephemeral per-session, never shared between versions
 

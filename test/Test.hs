@@ -403,6 +403,7 @@ configRoundtripTests =
                     , cMinHeight = 0
                     , cPrompt = ""
                     , cMixed = False
+                    , cStripPrefix = ""
                     }
          in read (show cfg) == cfg
     , test "Config Read/Show roundtrip default-like" $
@@ -436,6 +437,7 @@ configRoundtripTests =
                     , cMinHeight = 0
                     , cPrompt = ""
                     , cMixed = False
+                    , cStripPrefix = ""
                     }
          in read (show cfg) == cfg
     ]
@@ -487,6 +489,7 @@ testCfg =
         , cMinHeight = 0
         , cPrompt = ""
         , cMixed = False
+        , cStripPrefix = ""
         }
 
 hasAction :: FzfAction -> [FzfAction] -> Bool
