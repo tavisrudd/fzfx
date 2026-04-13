@@ -403,7 +403,7 @@ cmdFullPreview line = withCfg $ \Config{..} -> do
         BookmarkLine file ln _ -> highlightFull lkFile file ln
         FdLine st path -> do
             let pager = "less -Rc~ --lesskey-src=" <> lkFile
-            if cPreview == Diff && st /= Clean
+            if cPreview == Diff && (st == Unstaged || st == Staged)
                 then do
                     let da = diffArgs st path
                     piped ("git", da) ("delta", ["--paging=always", "--pager", T.pack pager])
