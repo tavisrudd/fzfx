@@ -471,6 +471,7 @@ data FzfAction
     | DisableSearch
     | RefreshPreview
     | JumpFirst
+    | Abort
     | Accept
     | ChangePreviewWindow !Text -- change-preview-window(...)
     | Become !Text -- become: command
@@ -621,7 +622,7 @@ transition cfg (EvSmartEnter isAlt)
     | cFd cfg == FdDirs =
         (cfg, [Become (cSelf cfg <> " " <> flg SNavigate <> " into {} {q}")])
     | isAlt =
-        (cfg, [Execute (cSelf cfg <> " " <> flg SEdit <> " {}")])
+        (cfg, [Execute (cSelf cfg <> " " <> flg SEdit <> " {}"), Abort])
     | otherwise =
         (cfg, [Accept])
 -- Query push: add to stack (dedup against top)
@@ -669,6 +670,7 @@ renderActions = T.intercalate "+" . map render1
     render1 RefreshPreview = "refresh-preview"
     render1 (ChangePreviewWindow w) = fzfWrap "change-preview-window" w
     render1 JumpFirst = "first"
+    render1 Abort = "abort"
     render1 Accept = "accept"
     render1 (Become cmd) = "become:" <> cmd
     render1 (Execute cmd) = fzfWrap "execute" cmd

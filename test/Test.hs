@@ -746,7 +746,7 @@ transitionSmartEnterTests =
          in acts == [Accept]
     , test "smartEnter: files mode, alt → execute edit" $
         let (_, acts) = transition testCfg (EvSmartEnter True)
-         in case acts of [Execute cmd] -> "edit" `T.isInfixOf` cmd; _ -> False
+         in case acts of [Execute cmd, Abort] -> "edit" `T.isInfixOf` cmd; _ -> False
     , test "smartEnter: dirs mode → become navigate" $
         let cfg1 = testCfg{cFd = FdDirs}
             (_, acts) = transition cfg1 (EvSmartEnter False)
