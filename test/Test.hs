@@ -46,6 +46,7 @@ main =
             , makeRelPathTests
             , interleaveTests
             , ordNubTests
+            , sortDatePathsTests
             , gitStatusCharTests
             , subcmdRoundtripTests
             , configRoundtripTests
@@ -334,6 +335,32 @@ ordNubTests =
         ordNub ["x", "x", "x"] == ["x"]
     ]
 
+sortDatePathsTests :: [TestResult]
+sortDatePathsTests =
+    [ test "date paths reverse within each parent directory" $
+        sortDatePaths
+            [ "b/2024-01-01-handoff.md"
+            , "a/z.txt"
+            , "a/2024-03-01-handoff.md"
+            , "a/2026-01-01-handoff.md"
+            , "a/alpha.txt"
+            , "b/2025-01-01-handoff.md"
+            ]
+            == [ "a/2026-01-01-handoff.md"
+               , "a/2024-03-01-handoff.md"
+               , "a/alpha.txt"
+               , "a/z.txt"
+               , "b/2025-01-01-handoff.md"
+               , "b/2024-01-01-handoff.md"
+               ]
+    , test "ordinary names retain alphabetical slots" $
+        sortDatePaths ["z.txt", "2024-01-01-a", "a.txt", "2025-01-01-a"]
+            == ["2025-01-01-a", "2024-01-01-a", "a.txt", "z.txt"]
+    , test "malformed dates remain alphabetical" $
+        sortDatePaths ["2024-13-01-a", "2023-01-01-a", "2025-01-01-a"]
+            == ["2025-01-01-a", "2024-13-01-a", "2023-01-01-a"]
+    ]
+
 -- ═══════════════════════════════════════════════════════════════════════
 -- gitStatusChar
 -- ═══════════════════════════════════════════════════════════════════════
@@ -396,6 +423,7 @@ configRoundtripTests =
                     , cSavedFileSel = ["/home/user/proj/a.hs"]
                     , cSavedDirSel = []
                     , cGitSt = False
+                    , cRecent = False
                     , cPreviewOn = True
                     , cPreviewLayout = PreviewRight
                     , cHeight = "100%"
@@ -430,6 +458,7 @@ configRoundtripTests =
                     , cSavedFileSel = []
                     , cSavedDirSel = []
                     , cGitSt = False
+                    , cRecent = True
                     , cPreviewOn = True
                     , cPreviewLayout = PreviewRight
                     , cHeight = "40%"
@@ -482,6 +511,7 @@ testCfg =
         , cSavedFileSel = []
         , cSavedDirSel = []
         , cGitSt = False
+        , cRecent = False
         , cPreviewOn = True
         , cPreviewLayout = PreviewRight
         , cHeight = "100%"
@@ -607,6 +637,10 @@ transitionToggleTests =
     , test "toggle git_status: emits reload + refresh-preview + footer" $
         let (_, acts) = transition testCfg (EvToggle TgGitStatus "")
          in hasReload acts && hasAction RefreshPreview acts && hasFooter acts
+    , test "toggle recent: switches order and reloads" $
+        let (cfg', acts) = transition testCfg (EvToggle TgRecent "")
+            (cfg'', _) = transition cfg' (EvToggle TgRecent "")
+         in cRecent cfg' && not (cRecent cfg'') && hasReload acts && hasFooter acts
     , -- preview layout toggle
       test "toggle preview_layout: right → bottom" $
         let (cfg', _) = transition testCfg (EvToggle TgPreviewLayout "")
@@ -638,16 +672,20 @@ transitionTransformTests =
          in hasAction (ChangePrompt "files> ") acts && hasAction EnableSearch acts
     , test "transform: plain query, not wasRg → no reload" $
         let (_, acts) = transition testCfg (EvTransform "hello")
-         in not (hasReload acts)
+         in not (hasReload acts) && noAction ToggleSort acts
     , test "transform: plain query, wasRg → reload" $
         let cfg1 = testCfg{cWasRg = True}
             (_, acts) = transition cfg1 (EvTransform "hello")
-         in hasReload acts
+         in hasReload acts && hasAction ToggleSort acts
     , test "transform: #pattern → rg prompt, disable search, reload" $
         let (_, acts) = transition testCfg (EvTransform "#pattern")
          in hasAction (ChangePrompt "rg> ") acts
                 && hasAction DisableSearch acts
+                && hasAction ToggleSort acts
                 && hasReload acts
+    , test "transform: rg query stays sorted" $
+        let (_, acts) = transition testCfg{cWasRg = True} (EvTransform "#pattern")
+         in noAction ToggleSort acts
     , test "transform: #pat#filt → filter prompt" $
         let (_, acts) = transition testCfg (EvTransform "#pat#filt")
          in hasAction (ChangePrompt "filter> ") acts
@@ -817,6 +855,8 @@ renderActionsTests =
     , test "renderActions: change-border-label" $
         renderActions [ChangeFooter "status text"]
             == "change-border-label(status text)"
+    , test "renderActions: toggle-sort" $
+        renderActions [ToggleSort] == "toggle-sort"
     , test "renderActions: change-preview-window" $
         renderActions [ChangePreviewWindow "bottom:50%"]
             == "change-preview-window(bottom:50%)"

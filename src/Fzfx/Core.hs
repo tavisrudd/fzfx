@@ -47,6 +47,7 @@ module Fzfx.Core (
     -- * List Utilities
     interleave,
     ordNub,
+    sortDatePaths,
 
     -- * Fzf Action Rendering
     fzfWrap,
@@ -64,6 +65,8 @@ module Fzfx.Core (
 import Control.Monad (guard)
 import Data.ByteString.Lazy qualified as LBS
 import Data.List qualified as L
+import Data.Maybe (mapMaybe)
+import Data.Ord (Down (..))
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -197,6 +200,7 @@ data Config = Config
     , cSavedFileSel :: ![Text] -- saved file mode selections
     , cSavedDirSel :: ![Text] -- saved dir mode selections
     , cGitSt :: !Bool -- git status filter (only dirty files)
+    , cRecent :: !Bool -- order file matches by modification time
     , cPreviewOn :: !Bool -- preview visible
     , cPreviewLayout :: !PreviewLayout -- preview position (right/bottom)
     , cHeight :: !Text -- fzf --height value (e.g. "40%", "~100%")
@@ -389,6 +393,43 @@ ordNub = go Set.empty
         | Set.member x seen = go seen xs
         | otherwise = x : go (Set.insert x seen) xs
 
+{- | Keep parent directories and ordinary names alphabetical, while putting
+date-prefixed names in newest-first order in their existing slots.
+-}
+sortDatePaths :: [Text] -> [Text]
+sortDatePaths paths = concatMap reorder $ L.groupBy sameParent sorted
+  where
+    parent = FP.takeDirectory . FP.dropTrailingPathSeparator . t
+    sameParent a b = parent a == parent b
+    sorted = L.sortOn (\p -> (parent p, p)) paths
+    reorder group = fill group (L.sortOn (\p -> (Down (datePrefix p), p)) (mapMaybe dated group))
+    dated p = p <$ datePrefix p
+    fill [] _ = []
+    fill (p : ps) dates = case datePrefix p of
+        Nothing -> p : fill ps dates
+        Just _ -> case dates of
+            d : ds -> d : fill ps ds
+            [] -> p : fill ps []
+    datePrefix p =
+        let name = T.pack (FP.takeFileName (t p))
+            prefix = T.take 10 name
+            digits = T.all (`T.elem` "0123456789")
+            month = read (t (T.take 2 (T.drop 5 prefix))) :: Int
+            day = read (t (T.take 2 (T.drop 8 prefix))) :: Int
+         in if T.length name > 11
+                && T.index name 10 == '-'
+                && T.index prefix 4 == '-'
+                && T.index prefix 7 == '-'
+                && digits (T.take 4 prefix)
+                && digits (T.take 2 (T.drop 5 prefix))
+                && digits (T.take 2 (T.drop 8 prefix))
+                && month >= 1
+                && month <= 12
+                && day >= 1
+                && day <= 31
+                then Just prefix
+                else Nothing
+
 -- ═══════════════════════════════════════════════════════════════════════
 -- Header Text
 -- ═══════════════════════════════════════════════════════════════════════
@@ -425,6 +466,7 @@ hdrText Config{..} =
             , "M-i " <> tog cIgn "ign"
             , "C-p " <> (if cPreviewLayout == PreviewRight then off "→" else on "↓")
             , "M-g " <> tog cGitSt "git changed"
+            , "M-e " <> tog cRecent "recent"
             , "C-M-g " <> (if cPreview == Diff then on "diff" else off "diff")
             , "C-f " <> (if cHeightAuto then dim "auto" else dim "full")
             , "M-u/s/?"
@@ -453,6 +495,7 @@ data ToggleName
     | TgHidden
     | TgNoIgnore
     | TgGitStatus
+    | TgRecent
     | TgPreviewLayout
     | TgType -- auto-toggles between [files|mixed]/dirs
     | TgTypeD -- switch to dirs
@@ -469,6 +512,7 @@ data FzfAction
     | ReloadSync !Text -- command to run
     | EnableSearch
     | DisableSearch
+    | ToggleSort
     | RefreshPreview
     | JumpFirst
     | Abort
@@ -507,6 +551,10 @@ transition cfg (EvToggle TgGitStatus _) =
     let on = not (cGitSt cfg)
         cfg' = cfg{cGitSt = on, cPreview = if on then Diff else Content}
      in (cfg', [reloadAction cfg', RefreshPreview, ChangeFooter (hdrText cfg')])
+-- Toggle: most recently modified files first
+transition cfg (EvToggle TgRecent _) =
+    let cfg' = cfg{cRecent = not (cRecent cfg)}
+     in (cfg', [reloadAction cfg', ChangeFooter (hdrText cfg')])
 -- Toggle: type auto (dispatch to D or F/Mixed)
 transition cfg (EvToggle TgType q) =
     let target = case cFd cfg of
@@ -588,7 +636,8 @@ transition cfg (EvTransform q) =
             RgLocked{} -> [ChangePrompt "filter> ", DisableSearch, reloadAction cfg']
             FzfRg{} -> [ChangePrompt "fzf#rg> ", DisableSearch, reloadAction cfg']
             FzfRgPending{} -> [ChangePrompt "fzf#> ", DisableSearch, reloadAction cfg']
-     in (cfg', act <> hdrUpd)
+        sortUpd = [ToggleSort | isRg /= wasRg]
+     in (cfg', sortUpd <> act <> hdrUpd)
 -- ExtraArgs: insert " -- " at the right position for rg extra args
 transition cfg (EvExtraArgs q) =
     let result = case parseQuery q of
@@ -667,6 +716,7 @@ renderActions = T.intercalate "+" . map render1
     render1 (ReloadSync cmd) = fzfWrap "reload-sync" cmd
     render1 EnableSearch = "enable-search"
     render1 DisableSearch = "disable-search"
+    render1 ToggleSort = "toggle-sort"
     render1 RefreshPreview = "refresh-preview"
     render1 (ChangePreviewWindow w) = fzfWrap "change-preview-window" w
     render1 JumpFirst = "first"

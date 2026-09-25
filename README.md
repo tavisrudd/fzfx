@@ -11,6 +11,7 @@ git status filtering, query history, and saved selections.
 ## Features
 
 - **File search** via `fd` with hidden/ignored file toggles
+- **File order** — date-prefixed names (`yyyy-mm-dd-...`) newest first within each directory; toggle recently edited files first with `alt-e`
 - **Live ripgrep** search with `#pattern` query syntax
 - **Directory navigation** — drill in/out, jump to git root, zoxide integration
 - **Git awareness** — filter by status (unstaged/staged/untracked), diff preview via `delta`
@@ -97,6 +98,7 @@ fzfx "query"            # start with an initial query
 | `ctrl-r`        | Jump to git root                    |
 | `alt-z`         | Zoxide jump                         |
 | `alt-g`         | Toggle git status filter            |
+| `alt-e`         | Toggle recently edited files first  |
 | `ctrl-alt-g`    | Toggle diff preview                 |
 | `alt-h`         | Toggle hidden files                 |
 | `alt-p`         | Toggle preview                      |

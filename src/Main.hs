@@ -14,6 +14,7 @@ import Data.Char (chr)
 import Data.List (partition, sort)
 import Data.List qualified as L
 import Data.Maybe (fromMaybe, listToMaybe)
+import Data.Ord (Down (..))
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -27,6 +28,7 @@ import System.Directory (
     doesDirectoryExist,
     doesFileExist,
     getCurrentDirectory,
+    getModificationTime,
     getSymbolicLinkTarget,
     getTemporaryDirectory,
     pathIsSymbolicLink,
@@ -190,7 +192,13 @@ reloadFiles Config{..} query = do
     let mainFiles = sort $ filter (not . T.null) (T.lines out)
         mainSet = Set.fromList mainFiles
         newExtras = sort $ filter (\f -> not (Set.member f mainSet)) extraFiles
-        files = interleave mainFiles newExtras
+        allFiles = interleave mainFiles newExtras
+    files <-
+        if cRecent
+            then do
+                times <- mapM (\f -> (f,) <$> ((Just <$> getModificationTime (t f)) `catch` \(_ :: IOException) -> pure Nothing)) allFiles
+                pure $ map fst $ L.sortOn (\(f, mtime) -> (T.isSuffixOf "/" f, Down mtime, f)) times
+            else pure $ sortDatePaths allFiles
     labeled <-
         if T.null cGit
             then pure [(Clean, f) | f <- files]
@@ -759,6 +767,7 @@ cmdDebug = withCfg $ \cfg -> do
             , "  " <> bold "M-h" <> "    hidden       " <> if cHid then on "ON" else off "off"
             , "  " <> bold "M-i" <> "    no-ignore    " <> if cIgn then on "ON" else off "off"
             , "  " <> bold "M-g" <> "    git status   " <> if cGitSt then on "ON" else off "off"
+            , "  " <> bold "M-e" <> "    recent edits " <> if cRecent then on "ON" else off "off"
             , "  "
                 <> bold "C-M-g"
                 <> "  diff/content "
@@ -797,6 +806,7 @@ cmdDebug = withCfg $ \cfg -> do
                 , ("cIgn", "no_ignore", showT cIgn)
                 , ("cPreview", "preview_mode", showT cPreview)
                 , ("cGitSt", "git_status", showT cGitSt)
+                , ("cRecent", "recent_edits", showT cRecent)
                 , ("cPreviewOn", "preview_on", showT cPreviewOn)
                 , ("cPreviewLy", "preview_lay", showT cPreviewLayout)
                 , ("cHeight", "height", cHeight)
@@ -875,6 +885,7 @@ cmdToggle nameAndArgs = do
             "hidden" -> TgHidden
             "no_ignore" -> TgNoIgnore
             "git_status" -> TgGitStatus
+            "recent" -> TgRecent
             "preview_layout" -> TgPreviewLayout
             "type_toggle" -> TgType
             "type_d" -> TgTypeD
@@ -981,7 +992,7 @@ relaunch :: Config -> IO ()
 relaunch cfg = do
     git <- detectGit (cCwd cfg)
     self <- T.pack <$> getExecutablePath
-    saveConfig cfg{cGit = git, cSelf = self}
+    saveConfig cfg{cGit = git, cSelf = self, cWasRg = parseQuery (cQuery cfg) /= FileMode}
     mainLaunch defaultRunOpts
 
 cmdHeightToggle :: Text -> IO ()
@@ -1093,6 +1104,7 @@ fzfArgs cfg@Config{..} = baseOpts <> selfBindings <> staticBindings
         , "--prompt=" <> if T.null cPrompt then (case cFd of FdDirs -> "dirs"; FdMixed -> "mixed"; FdFiles -> "files") <> "> " else cPrompt
         , "--height=" <> cHeight
         ]
+            <> ["--no-sort" | parseQuery cQuery == FileMode]
             <> ["--min-height=" <> showT cMinHeight | cMinHeight > 0]
             <> [ "--query=" <> cQuery
                , "--preview=" <> cSelf <> " " <> flg SPreview <> " {} {q}"
@@ -1106,6 +1118,7 @@ fzfArgs cfg@Config{..} = baseOpts <> selfBindings <> staticBindings
         , xf cfg "alt-@" SToggle "at_prefix"
         , xe cfg "alt-/" SFullPreview "{}" ""
         , xf cfg "alt-g" SToggle "git_status"
+        , xf cfg "alt-e" SToggle "recent"
         , bind "alt-u" (statusToggle "U")
         , bind "alt-s" (statusToggle "S")
         , bind "alt-?" (statusToggle "?")
@@ -1377,6 +1390,7 @@ keybindingsHelp =
         , "  alt-r           swap query/results"
         , "  alt-/           full-screen preview in less"
         , "  alt-g           toggle git status filter"
+        , "  alt-e           toggle recent edits first"
         , "  ctrl-alt-g      toggle diff preview"
         , "  alt-m           toggle mixed mode (files+dirs)"
         , "  alt-t           tokei stats for selection dir"
@@ -1521,10 +1535,11 @@ buildConfig RunOpts{..} = do
             , cDirQuery = if fd == FdDirs then q else ""
             , cQueryStack = persistedStack
             , cPendingQuery = ""
-            , cWasRg = False
+            , cWasRg = parseQuery q /= FileMode
             , cSavedFileSel = []
             , cSavedDirSel = []
             , cGitSt = gitSt
+            , cRecent = False
             , cPreviewOn = fromMaybe True optPreview
             , cPreviewLayout = fromMaybe PreviewRight optPreviewLayout
             , cHeight = height

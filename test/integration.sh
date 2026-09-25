@@ -168,6 +168,50 @@ test_file_filtering() {
     sleep 0.3
 }
 
+test_file_order() {
+    echo "# test_file_order"
+    mkdir -p "$TEST_DIR/handoffs"
+    for year in 2024 2025 2026; do
+        echo "handoff content" > "$TEST_DIR/handoffs/$year-01-01-handoff.md"
+    done
+    touch -t 202609010000 "$TEST_DIR/handoffs/2024-01-01-handoff.md"
+    touch -t 202509010000 "$TEST_DIR/handoffs/2025-01-01-handoff.md"
+    touch -t 202409010000 "$TEST_DIR/handoffs/2026-01-01-handoff.md"
+
+    launch_fzfx "handoff"
+    wait_for "2026-01-01-handoff.md" 3 || true
+    capture
+    local newest_date oldest_date
+    newest_date=$(sed 's/│.*//' "$CAPTURE_FILE" | grep -nF "2026-01-01-handoff.md" | head -1 | cut -d: -f1)
+    oldest_date=$(sed 's/│.*//' "$CAPTURE_FILE" | grep -nF "2024-01-01-handoff.md" | head -1 | cut -d: -f1)
+    if [[ -n "$newest_date" && -n "$oldest_date" && "$newest_date" -lt "$oldest_date" ]]; then
+        PASSED=$((PASSED + 1))
+    else
+        FAILED=$((FAILED + 1))
+        FAILURES+=("dated handoffs should be newest first")
+        sed -n '1,12p' "$CAPTURE_FILE" >&2
+    fi
+    rm -f "$CAPTURE_FILE"
+
+    send "M-e"
+    sleep 0.8
+    capture
+    local most_recent least_recent dir_line
+    most_recent=$(sed 's/│.*//' "$CAPTURE_FILE" | grep -nF "2024-01-01-handoff.md" | head -1 | cut -d: -f1)
+    least_recent=$(sed 's/│.*//' "$CAPTURE_FILE" | grep -nF "2026-01-01-handoff.md" | head -1 | cut -d: -f1)
+    dir_line=$(sed 's/│.*//' "$CAPTURE_FILE" | grep -nE 'handoffs/[[:space:]]*$' | head -1 | cut -d: -f1)
+    if [[ -n "$most_recent" && -n "$least_recent" && -n "$dir_line" && "$most_recent" -lt "$least_recent" && "$most_recent" -lt "$dir_line" ]]; then
+        PASSED=$((PASSED + 1))
+    else
+        FAILED=$((FAILED + 1))
+        FAILURES+=("recent-edits toggle should put most recently modified match first")
+    fi
+    rm -f "$CAPTURE_FILE"
+    send "C-g"
+    sleep 0.3
+    rm -rf "$TEST_DIR/handoffs"
+}
+
 test_rg_mode_switch() {
     echo "# test_rg_mode_switch"
     launch_fzfx
@@ -481,6 +525,7 @@ main() {
 
     test_basic_launch
     test_file_filtering
+    test_file_order
     test_rg_mode_switch
     test_rg_locked_mode
     test_toggle_hidden
