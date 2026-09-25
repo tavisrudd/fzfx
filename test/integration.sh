@@ -168,6 +168,20 @@ test_file_filtering() {
     sleep 0.3
 }
 
+test_resize_reload() {
+    echo "# test_resize_reload"
+    launch_fzfx "resize-witness"
+    wait_for "mixed>" 3 || true
+    echo "new file" > "$TEST_DIR/resize-witness.txt"
+    assert_not_contains "new file is absent before resize" "resize-witness.txt"
+    $TSRV resize-window -t test -x 180 -y 35
+    wait_for "resize-witness.txt" 3 || true
+    assert_contains "resize reloads file list" "resize-witness.txt"
+    send "C-g"
+    sleep 0.3
+    rm -f "$TEST_DIR/resize-witness.txt"
+}
+
 test_file_order() {
     echo "# test_file_order"
     mkdir -p "$TEST_DIR/handoffs"
@@ -525,6 +539,7 @@ main() {
 
     test_basic_launch
     test_file_filtering
+    test_resize_reload
     test_file_order
     test_rg_mode_switch
     test_rg_locked_mode

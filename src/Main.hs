@@ -1161,6 +1161,9 @@ fzfArgs cfg@Config{..} = baseOpts <> selfBindings <> staticBindings
         , bind "ctrl-space" "preview-page-up"
         , xf cfg "ctrl-alt-g" SToggle "diff"
         , bind "ctrl-alt-r" ("reload-sync(" <> cSelf <> " " <> flg SReload <> " {q})")
+        , -- Async `reload` (not `reload-sync`): fzf cancels in-flight reloads
+          -- mid-drag, so the SIGWINCH storm coalesces to the final settled size.
+          bind "resize" ("reload(" <> cSelf <> " " <> flg SReload <> " {q})")
         , bind "ctrl-h" ("execute(" <> cSelf <> " --help | less -R)")
         , bind "ctrl-g" "abort"
         , bind "ctrl-z" "abort"
