@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Preview notebooks, directories, and files with the best available tool.
+
+target=${1-}
+if [[ -z $target ]]; then
+    printf 'usage: fzf-preview <path>\n' >&2
+    exit 2
+fi
+
+# A relative name beginning with '-' must not be treated as a tool option.
+if [[ $target == -* ]]; then
+    target="./$target"
+fi
+
+if [[ $target == *.ipynb ]] && command -v nbpreview >/dev/null 2>&1; then
+    nbpreview "$target" && exit 0
+fi
+
+if [[ -d $target ]]; then
+    if command -v eza >/dev/null 2>&1; then
+        eza --icons --git-ignore --git --tree -L 3 --color=always "$target" && exit 0
+    fi
+    ls -la "$target"
+elif command -v bat >/dev/null 2>&1; then
+    bat --style=plain --color=always --line-range 0:100 -- "$target" || head -n 100 "$target"
+elif command -v batcat >/dev/null 2>&1; then
+    batcat --style=plain --color=always --line-range 0:100 -- "$target" || head -n 100 "$target"
+else
+    head -n 100 "$target"
+fi

@@ -30,8 +30,8 @@ git status filtering, query history, and saved selections.
 | [fzf](https://github.com/junegunn/fzf)       | Interactive filter    |
 | [fd](https://github.com/sharkdp/fd)          | File finding          |
 | [ripgrep](https://github.com/BurntSushi/ripgrep) | Content search   |
-| [bat](https://github.com/sharkdp/bat)        | Syntax preview        |
-| [eza](https://github.com/eza-community/eza)  | Directory tree        |
+| [bat](https://github.com/sharkdp/bat)        | Highlighted and full-screen file previews |
+| [eza](https://github.com/eza-community/eza)  | Full-screen directory tree previews |
 | [delta](https://github.com/dandavison/delta)  | Git diff preview     |
 | [git](https://git-scm.com)                    | Git integration      |
 
@@ -44,6 +44,11 @@ git status filtering, query history, and saved selections.
 | [tokei](https://github.com/XAMPPRocky/tokei)      | Code statistics      |
 
 **Build dependencies:** GHC 9.6+ and Cabal, or Nix.
+
+Normal previews use an existing `fzf-preview` on `PATH`. When none is found,
+fzfx adds its bundled script to the session's `PATH`. It uses `nbpreview` for
+notebooks, `eza` for directories, and `bat` (or `batcat`) for files when
+available, falling back to `ls` and `head`.
 
 ## Installation
 

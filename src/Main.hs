@@ -2,6 +2,7 @@
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module Main (main) where
 
@@ -20,25 +21,30 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
+import Language.Haskell.TH.Syntax (addDependentFile, lift, runIO)
 import Options.Applicative
 import Options.Applicative.Help.Pretty (pretty)
 import System.Directory (
+    Permissions (executable),
     canonicalizePath,
     createDirectoryIfMissing,
     doesDirectoryExist,
     doesFileExist,
+    findExecutable,
     getCurrentDirectory,
     getModificationTime,
+    getPermissions,
     getSymbolicLinkTarget,
     getTemporaryDirectory,
     pathIsSymbolicLink,
     removeDirectoryRecursive,
     setCurrentDirectory,
+    setPermissions,
  )
 import System.Environment (getArgs, getExecutablePath, lookupEnv, setEnv)
 
 import System.Exit (exitFailure)
-import System.FilePath (isAbsolute, pathSeparator, splitDirectories, takeDirectory, takeExtension, (</>))
+import System.FilePath (isAbsolute, pathSeparator, splitDirectories, takeDirectory, (</>))
 import System.FilePath qualified as FP
 import System.IO (hFlush, hPutStrLn, readFile', stderr, stdout)
 import System.Posix.IO (OpenMode (ReadWrite), closeFd, defaultFileFlags, dupTo, fdWrite, openFd, stdError, stdInput, stdOutput)
@@ -348,7 +354,7 @@ cmdPreview args = withCfg $ \Config{..} -> do
     if T.null (T.strip item)
         then case tryBookmark (stripAnsi query) of
             Just (f, ln, _) -> highlightPreview f ln
-            Nothing -> contentPreview (not (T.null cGit)) "."
+            Nothing -> contentPreview "."
         else case parseFzfItem item of
             RgLine file ln _ -> highlightPreview file ln
             BookmarkLine file ln _ -> highlightPreview file ln
@@ -358,7 +364,7 @@ cmdPreview args = withCfg $ \Config{..} -> do
                     diffPreview st path
                 | otherwise -> do
                     showSymlink path
-                    contentPreview (not (T.null cGit)) path
+                    contentPreview path
   where
     highlightPreview file ln = do
         showSymlink file
@@ -378,7 +384,7 @@ diffPreview :: GitStatus -> Text -> IO ()
 diffPreview st path = do
     let da = diffArgs st path
     if null da
-        then contentPreview True path
+        then contentPreview path
         else piped ("git", da) ("delta", [])
 
 ezaTreeArgs :: Bool -> Text -> [Text]
@@ -387,19 +393,8 @@ ezaTreeArgs inGit p =
         <> (if inGit then ["-l", "--no-permissions", "--no-filesize", "--no-user", "--no-time", "--git"] else [])
         <> [p]
 
-contentPreview :: Bool -> Text -> IO ()
-contentPreview inGit path = do
-    isDir <- doesDirectoryExist (t path)
-    if isDir
-        then do
-            p <- if path == "." then T.pack <$> getCurrentDirectory else pure path
-            exec "eza" (ezaTreeArgs inGit p)
-        else
-            if takeExtension (t path) == ".ipynb"
-                then
-                    exec "nbpreview" [path]
-                else
-                    exec "bat" [path, "--style=plain", "--color=always", "--line-range", "0:100"]
+contentPreview :: Text -> IO ()
+contentPreview path = exec "fzf-preview" [path]
 
 cmdFullPreview :: Text -> IO ()
 cmdFullPreview line = withCfg $ \Config{..} -> do
@@ -1116,7 +1111,7 @@ fzfArgs cfg@Config{..} = baseOpts <> selfBindings <> staticBindings
     selfBindings =
         [ xf cfg "change" STransform "{q}"
         , xf cfg "alt-@" SToggle "at_prefix"
-        , xe cfg "alt-/" SFullPreview "{}" ""
+        , bind "alt-/" ("execute(printf '\\033[?1049h'; " <> cSelf <> " " <> flg SFullPreview <> " {})")
         , xf cfg "alt-g" SToggle "git_status"
         , xf cfg "alt-e" SToggle "recent"
         , bind "alt-u" (statusToggle "U")
@@ -1464,6 +1459,7 @@ mainLaunch opts =
             -- Relaunch: config was saved by `relaunch`, load and run
             cfg <- loadConfig
             setCurrentDirectory (t (cCwd cfg))
+            ensurePreviewFallback cfg
             -- Resolve "auto" height (needs terminal dimensions at launch time)
             cfg' <-
                 if cHeightAuto cfg
@@ -1487,7 +1483,34 @@ firstLaunch opts = do
         )
         $ \_ -> do
             setEnv "_FZFX_STATE_DIR" (t sd)
+            ensurePreviewFallback cfg
             launchFzf cfg
+
+{- | Make the packaged preview script available to this session when the user
+has not provided their own fzf-preview on PATH.
+-}
+ensurePreviewFallback :: Config -> IO ()
+ensurePreviewFallback cfg = do
+    existing <- findExecutable "fzf-preview"
+    case existing of
+        Just _ -> pure ()
+        Nothing -> do
+            let binDir = t (cDir cfg) </> "bin"
+                target = binDir </> "fzf-preview"
+            createDirectoryIfMissing True binDir
+            writeFile target bundledPreview
+            permissions <- getPermissions target
+            setPermissions target permissions{executable = True}
+            oldPath <- fromMaybe "" <$> lookupEnv "PATH"
+            setEnv "PATH" (binDir <> if null oldPath then "" else ":" <> oldPath)
+
+bundledPreview :: String
+bundledPreview =
+    $( do
+        let path = "shell/fzf-preview"
+        addDependentFile path
+        lift =<< runIO (readFile path)
+     )
 
 buildConfig :: RunOpts -> IO Config
 buildConfig RunOpts{..} = do

@@ -168,6 +168,68 @@ test_file_filtering() {
     sleep 0.3
 }
 
+test_preview_fallback() {
+    echo "# test_preview_fallback"
+    local isolated_bin="$TEST_DIR/preview-bin"
+    local found="$TEST_DIR/preview-found"
+    local output="$TEST_DIR/preview-output"
+    mkdir -p "$isolated_bin"
+    for tool in bash git fd head ls tmux; do
+        ln -s "$(command -v "$tool")" "$isolated_bin/$tool"
+    done
+    cat > "$isolated_bin/fzf" <<'EOF'
+#!/usr/bin/env bash
+while IFS= read -r _; do :; done
+command -v fzf-preview > "$FZFX_PROBE_FOUND"
+"$FZFX_PROBE_SELF" --preview $' \t'"$FZFX_PROBE_FILE" > "$FZFX_PROBE_OUTPUT"
+EOF
+    chmod +x "$isolated_bin/fzf"
+
+    PATH="$isolated_bin" FZFX_PROBE_SELF="$FZFX" FZFX_PROBE_FOUND="$found" FZFX_PROBE_FILE="$TEST_DIR/README.md" FZFX_PROBE_OUTPUT="$output" \
+        "$FZFX" --output stdout --cwd "$TEST_DIR"
+    if [[ $(cat "$found") == */bin/fzf-preview && $(cat "$output") == *"modified"* ]]; then
+        PASSED=$((PASSED + 1))
+    else
+        FAILED=$((FAILED + 1))
+        FAILURES+=("bundled preview should be injected and work without bat/eza")
+    fi
+
+    PATH="$isolated_bin" FZFX_PROBE_SELF="$FZFX" FZFX_PROBE_FOUND="$found" FZFX_PROBE_FILE="$TEST_DIR/sub" FZFX_PROBE_OUTPUT="$output" \
+        "$FZFX" --output stdout --cwd "$TEST_DIR"
+    if grep -qF "mid.txt" "$output"; then
+        PASSED=$((PASSED + 1))
+    else
+        FAILED=$((FAILED + 1))
+        FAILURES+=("directory preview should fall back to ls")
+    fi
+
+    echo '{"cells":[]}' > "$TEST_DIR/notebook.ipynb"
+    PATH="$isolated_bin" FZFX_PROBE_SELF="$FZFX" FZFX_PROBE_FOUND="$found" FZFX_PROBE_FILE="$TEST_DIR/notebook.ipynb" FZFX_PROBE_OUTPUT="$output" \
+        "$FZFX" --output stdout --cwd "$TEST_DIR"
+    if grep -qF '"cells"' "$output"; then
+        PASSED=$((PASSED + 1))
+    else
+        FAILED=$((FAILED + 1))
+        FAILURES+=("notebook preview should fall back when nbpreview is missing")
+    fi
+    rm -f "$TEST_DIR/notebook.ipynb"
+
+    cat > "$isolated_bin/fzf-preview" <<'EOF'
+#!/usr/bin/env bash
+printf 'custom preview\n'
+EOF
+    chmod +x "$isolated_bin/fzf-preview"
+    PATH="$isolated_bin" FZFX_PROBE_SELF="$FZFX" FZFX_PROBE_FOUND="$found" FZFX_PROBE_FILE="$TEST_DIR/README.md" FZFX_PROBE_OUTPUT="$output" \
+        "$FZFX" --output stdout --cwd "$TEST_DIR"
+    if [[ $(cat "$found") == "$isolated_bin/fzf-preview" && $(cat "$output") == "custom preview" ]]; then
+        PASSED=$((PASSED + 1))
+    else
+        FAILED=$((FAILED + 1))
+        FAILURES+=("existing fzf-preview should take precedence")
+    fi
+    rm -rf "$isolated_bin" "$found" "$output"
+}
+
 test_resize_reload() {
     echo "# test_resize_reload"
     launch_fzfx "resize-witness"
@@ -531,6 +593,7 @@ main() {
         echo "Build first: nix build" >&2
         exit 1
     fi
+    FZFX="$(realpath "$FZFX")"
 
     setup_test_dir
     echo "Test dir: $TEST_DIR"
@@ -539,6 +602,7 @@ main() {
 
     test_basic_launch
     test_file_filtering
+    test_preview_fallback
     test_resize_reload
     test_file_order
     test_rg_mode_switch
